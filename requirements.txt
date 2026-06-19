@@ -1,0 +1,13 @@
+torch
+torchvision
+timm
+einops
+numpy
+scipy
+scikit-learn
+tqdm
+h5py
+hydra-core
+omegaconf
+wandb
+dgl

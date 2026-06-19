@@ -1,0 +1,268 @@
+# @package _global_
+datasets:
+  INT_kidney:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/INT_kidney"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  INT_prostate:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/INT_prostate"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  MEND_bowel:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/MEND_bowel"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  MEND_brain:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/MEND_brain"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  MEND_colon:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/MEND_colon"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  MEND_kidney:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/MEND_kidney"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  MEND_lung:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/MEND_lung"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  MEND_prostate:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/MEND_prostate"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  MEND_skin:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/MEND_skin"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  MISC_brain:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/MISC_brain"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  MISC_colon:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/MISC_colon"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  MISC_heart:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/MISC_heart"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  MISC_lung:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/MISC_lung"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  NCBI_bladder:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/NCBI_bladder"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  NCBI_brain:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/NCBI_brain"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  NCBI_breast:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/NCBI_breast"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  NCBI_cervix:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/NCBI_cervix"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  NCBI_eye:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/NCBI_eye"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  NCBI_kidney:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/NCBI_kidney"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  NCBI_liver:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/NCBI_liver"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  NCBI_lung:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/NCBI_lung"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  NCBI_lymph:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/NCBI_lymph"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  NCBI_pancreas:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/NCBI_pancreas"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  NCBI_skin:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/NCBI_skin"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  NCBI_uterus:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/NCBI_uterus"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  SPA_breast:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/SPA_breast"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  Xenium_lung:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/Xenium_lung"
+    gene_type: 'hvg'
+    num_genes: null
+    gene_dir: "gene"
+
+  TENX_brain:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/TENX_brain"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  TENX_breast:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/TENX_breast"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  TENX_cervix:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/TENX_cervix"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  TENX_colon:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/TENX_colon"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  TENX_kidney:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/TENX_kidney"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  TENX_lung:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/TENX_lung"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  TENX_lymph:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/TENX_lymph"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  TENX_ovary:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/TENX_ovary"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  TENX_prostate:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/TENX_prostate"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  ZEN_bowel:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/ZEN_bowel"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+  ZEN_colon:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/ALLVisium/ZEN_colon"
+    gene_type: 'hvg'
+    num_genes: 2000
+    gene_dir: "gene"
+
+dataset_groups:
+  all_visium:
+    - INT_kidney
+    - INT_prostate
+    - MEND_bowel
+    - MEND_brain
+    - MEND_colon
+    - MEND_kidney
+    - MEND_lung
+    - MEND_prostate
+    - MEND_skin
+    - MISC_brain
+    - MISC_colon
+    - MISC_heart
+    - MISC_lung
+    - NCBI_bladder
+    - NCBI_brain
+    - NCBI_breast
+    - NCBI_cervix
+    - NCBI_eye
+    - NCBI_kidney
+    - NCBI_liver
+    - NCBI_lung
+    - NCBI_lymph
+    - NCBI_pancreas
+    - NCBI_skin
+    - NCBI_uterus
+    - TENX_brain
+    - TENX_breast
+    - TENX_cervix
+    - TENX_colon
+    - TENX_kidney
+    - TENX_lung
+    - TENX_lymph
+    - TENX_ovary
+    - TENX_prostate
+    - ZEN_bowel
+    - ZEN_colon

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hist"
+version = "0.1.0"
+description = "HiST: predicting spatial gene expression from histology whole-slide images"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "torch",
+    "torchvision",
+    "timm",
+    "einops",
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "tqdm",
+    "h5py",
+    "hydra-core",
+    "omegaconf",
+    "wandb",
+    "dgl",
+]
+
+[tool.setuptools]
+packages = ["lib", "src", "tasks"]

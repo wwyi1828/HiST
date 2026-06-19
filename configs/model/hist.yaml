@@ -1,0 +1,49 @@
+slide_configs: "111-21"
+channel_factor: 1
+trans_type: "hybrid"
+dtrans_type: "hybrid"
+econvs_type: "patchconv"
+dconvs_type: "pixelshuffle"
+enc_act: 'ReLU'
+embed_dim_div: 2
+skip_first: 1
+
+input_projection:
+  mlp_ratio: 0.5
+  activation: null
+  dropout: 0.05
+  prenorm: false
+  bias: false
+  drop_first: false
+# Global token initialization:
+#   - 'mean' | 'max' | 'std': data-dependent pooling tokens
+#   - 'fix1e-4': fixed (non-trainable) token initialized ~ N(0, 1e-4)
+#   - 'lrn1e-4': learnable token initialized ~ N(0, 1e-4)
+token_init_types: ['max', 'mean', 'fix1e-4']
+# Global token path strategy: 'proj' | 'identity' | 'kernel'
+global_strategy: 'proj'
+# Skip-connection between encoder and decoder: 'concat' | 'add' | 'none'
+connection: 'concat'
+
+# Transformer
+ff_ratio: 4
+attn_drop: 0.05
+proj_drop: 0.0
+drop_path: 0.0
+window_size: 3
+share_qkv: false
+
+# Positional encoding: 'rpb' | 'alibi' | 'rope' | 'none'
+pos_emb: 'rpb'
+pos_std: 0.02
+
+# Convolution
+kernel_size: 2
+stride: 2
+dilation: 1
+conv_bias: false
+# Padding-edge handling: 'partial' | 'count' | 'none'
+edge_mode: none
+edge_eps: 1e-6
+# Norm placement: 'pre' | 'post'
+conv_norm_position: post

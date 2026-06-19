@@ -1,0 +1,13 @@
+# Result-saving mode: "best" | "epoch" | "disabled"
+mode: "best"
+
+wandb:
+  enabled: true
+  project: "HiST"
+  entity: null  # Set your W&B entity (e.g. "your-username")
+  tags: []
+  notes: ""
+
+results:
+  dir: "./results"
+  save_predictions: true

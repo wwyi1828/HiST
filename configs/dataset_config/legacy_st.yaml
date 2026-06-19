@@ -1,0 +1,6 @@
+# @package _global_
+datasets:
+  SPA_breast:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/SPA_breast"
+    gene_type: "hvg"
+    num_genes: 2000

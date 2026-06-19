@@ -1,0 +1,6 @@
+# @package _global_
+datasets:
+  Xenium_lung:
+    path: "${oc.env:HIST_DATA_ROOT,./data}/Xenium_lung"
+    gene_type: null
+    num_genes: null

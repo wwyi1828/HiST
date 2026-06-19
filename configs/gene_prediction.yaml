@@ -1,0 +1,100 @@
+# Main Hydra configuration for HiST gene prediction
+defaults:
+  - model: hist
+  - logging: default
+  - dataset_config: all_visium
+  - _self_
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+# ========== Dataset ==========
+dataset: "NCBI_brain"
+dataset_group: null
+test_fold: 1
+target_datasets: null
+
+# ========== Patch backbone ==========
+patch_backbone: "UNI"
+
+# ========== Model ==========
+model:
+  # Patch backbone training mode:
+  #   - precomputed: use pre-extracted features (fastest, no patch augmentation)
+  #   - frozen: freeze backbone, use raw images (allows patch augmentation)
+  #   - lora: add LoRA adapters to backbone attention (parameter-efficient)
+  #   - full: train the entire backbone (most expensive)
+  train_mode: "precomputed"
+
+  # LoRA configuration (only used when train_mode="lora")
+  lora_rank: 8
+  lora_alpha: 16
+  lora_lr_mult: 5.0
+
+# ========== Training ==========
+training:
+  lr: 1e-4
+  weight_decay: 1e-5
+  epochs: 100
+  eta_min_factor: 0  # Min LR factor (eta_min = lr * eta_min_factor)
+
+  slide_pretrained: false
+  accumulate_steps: 1
+
+  init_bias_with_mean: true  # Initialize output-head bias with log-mean expression
+
+  num_workers: 8
+  sub_batch_size: null  # null = use all patches in one batch
+  patch_aug: false  # Patch image augmentation (only effective when train_mode is NOT "precomputed")
+
+  eval_metric_freq: 50  # Val-loss computation frequency (1 = every epoch, null = only final epoch)
+  eval_metrics: ['R2', 'PCC', 'SCC', 'RMSE', 'MAE']  # Available: R2, PCC, SCC, MI, JS_Div, RMSE, AUC, SSIM, MAE
+
+  # Coordinate augmentation (applies even when train_mode is precomputed)
+  coord_aug:
+    enabled: true
+    schedule:
+      enabled: true
+      mode: "cosine"
+      start_factor: 1.0
+      end_factor: 0.0
+    mirror:
+      enabled: true
+      p: 0.75
+    shear:
+      enabled: true
+      max_angle: 30
+      p: 0.75
+    rotate:
+      enabled: true
+      max_angle: 45
+      p: 0.75
+      fixed_angle: false
+    drop:
+      enabled: true
+      p: 0.75
+
+# ========== Logging & results ==========
+logging:
+  mode: "best"  # "best" | "epoch" | "disabled"
+  wandb:
+    enabled: true
+    project: "HiST"
+    entity: null  # Set your W&B entity here
+    tags: []
+    notes: ""
+  results:
+    dir: "./results/gene_prediction"
+    save_path: "hist"
+
+# ========== Hydra ==========
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  sweep:
+    dir: results/sweeps/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: false
+  verbose: false
+  launcher:
+    _target_: hydra._internal.core_plugins.basic_launcher.Launcher
