@@ -210,8 +210,6 @@ def evaluate(
                     slide_metric_values = compute_gene_metrics(
                         slide_targets.flatten(),
                         slide_predictions.flatten(),
-                        binary_threshold=0,
-                        log_space=False,
                         metrics=eval_metrics
                     )
 
@@ -228,8 +226,6 @@ def evaluate(
         spot_level_metrics = compute_gene_metrics(
             all_targets.flatten(),
             all_predictions.flatten(),
-            binary_threshold=0,
-            log_space=False,
             metrics=eval_metrics
         )
 

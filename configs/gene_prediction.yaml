@@ -47,7 +47,7 @@ training:
   patch_aug: false  # Patch image augmentation (only effective when train_mode is NOT "precomputed")
 
   eval_metric_freq: 50  # Val-loss computation frequency (1 = every epoch, null = only final epoch)
-  eval_metrics: ['R2', 'PCC', 'SCC', 'RMSE', 'MAE']  # Available: R2, PCC, SCC, MI, JS_Div, RMSE, AUC, SSIM, MAE
+  eval_metrics: ['R2', 'PCC']  # Metrics reported in the paper
 
   # Coordinate augmentation (applies even when train_mode is precomputed)
   coord_aug:

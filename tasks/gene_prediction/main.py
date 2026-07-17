@@ -10,6 +10,7 @@ from lib.utils.coord_aug import build_coord_aug_transform
 from lib.utils.entrypoint import initialize_hydra_run
 from lib.utils.data import split_datasets
 from lib.utils.model_utils import format_token_init_types
+from lib.utils.metrics import validate_gene_metrics
 from .dataset import HiSTDataset, custom_collate_fn
 from torch.utils.data import DataLoader
 import torch.nn as nn
@@ -160,6 +161,7 @@ def main(cfg: DictConfig) -> None:
         seed=0,
         drop_keys=("datasets", "dataset_groups"),
     )
+    validate_gene_metrics(cfg.training.eval_metrics)
 
     print("Preparing datasets...")
     train_loader, test_loader, num_genes, image_suffix = prepare_datasets(cfg)
