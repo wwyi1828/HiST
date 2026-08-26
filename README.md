@@ -8,6 +8,8 @@
 Official PyTorch implementation of **HiST: A Hierarchical Sparse Transformer for
 Cross-Modal Spatial Transcriptomics Modeling** (ICML 2026).
 
+To reduce redundant compute across the community and make our work more accessible, we have made all preprocessed data publicly available. The processed datasets can be downloaded from [Google Drive](https://drive.google.com/drive/folders/1N7yNi_QigARVNeOuxuzFia53UUTspAPd?usp=sharing).
+
 HiST predicts a gene-expression vector at each measured spatial-transcriptomics
 (ST) location from its co-registered H&E image patch. It represents the measured
 locations as a sparse field on a compact two-dimensional lattice, builds
