@@ -1,4 +1,4 @@
-# HiST
+# HiST: Spatial Gene Expression Prediction from Histology
 
 [![Paper](https://img.shields.io/badge/arXiv-2606.14251-b31b1b.svg)](https://arxiv.org/abs/2606.14251)
 [![Conference](https://img.shields.io/badge/ICML-2026-4b44ce.svg)](https://icml.cc/virtual/2026/poster/61463)
@@ -8,7 +8,7 @@
 Official PyTorch implementation of **HiST: A Hierarchical Sparse Transformer for
 Cross-Modal Spatial Transcriptomics Modeling** (ICML 2026).
 
-To reduce redundant compute across the community and make our work more accessible, we have made all preprocessed data publicly available. The processed datasets can be downloaded from [Google Drive](https://drive.google.com/drive/folders/1N7yNi_QigARVNeOuxuzFia53UUTspAPd?usp=sharing).
+Download the preprocessed datasets from [Google Drive](https://drive.google.com/drive/folders/1N7yNi_QigARVNeOuxuzFia53UUTspAPd?usp=sharing).
 
 HiST predicts a gene-expression vector at each measured spatial-transcriptomics
 (ST) location from its co-registered H&E image patch. It represents the measured
@@ -17,7 +17,7 @@ multiscale context with a sparse encoder-decoder, and avoids creating feature
 tokens for unobserved background locations.
 
 > [OpenReview](https://openreview.net/forum?id=ptbzlHzmEv) ·
-> [Preprocessing](https://github.com/wwyi1828/PatchPreprocess) ·
+> [ST preprocessing](https://github.com/wwyi1828/PatchPreprocess#gene-and-morphology-preprocessing) ·
 > [SPAN](https://github.com/wwyi1828/SPAN)
 
 <p align="center">
@@ -56,6 +56,7 @@ tokens for unobserved background locations.
 - [Architecture at a glance](#architecture-at-a-glance)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Related repositories](#related-repositories)
 - [Data preparation](#data-preparation)
 - [Training and outputs](#training-and-outputs)
 - [Advanced model interfaces](#advanced-model-interfaces)
@@ -124,18 +125,38 @@ python -m tasks.gene_prediction.main \
 ```
 
 HiST uses Hydra, so any setting can be overridden with a dotted command-line
-key. The sections below define the data contract, training modes, outputs, and
+key. The sections below describe the input format, training modes, outputs, and
 supported architecture options.
+
+## Related repositories
+
+| Repository | Role |
+|---|---|
+| [PatchPreprocess](https://github.com/wwyi1828/PatchPreprocess#gene-and-morphology-preprocessing) | Prepare aligned gene-expression targets, patch features, and coordinates from HEST-style data for HiST. |
+| [SPAN](https://github.com/wwyi1828/SPAN) | Related sparse hierarchical framework for WSI classification, segmentation, and survival analysis. |
+| [Coordinate-aligned CLAM](https://github.com/wwyi1828/CLAM) | WSI patch extraction for the SPAN preprocessing route; the HEST-style HiST route starts from existing paired ST data and patches. |
 
 ## Data preparation
 
-Datasets and model weights are not bundled with this repository. The companion
+Preprocessed datasets are available through the download link above. Dataset files
+and model weights are stored separately from this Git repository. The companion
 [PatchPreprocess](https://github.com/wwyi1828/PatchPreprocess) repository prepares
 HEST-style spatial-transcriptomics data and patch features in the layout consumed
 by HiST. The upstream [HEST library](https://github.com/mahmoodlab/hest) can be
 used to obtain and standardize H&E-ST pairs.
 
 ### Using PatchPreprocess
+
+```text
+HEST-style paired ST data and H&E patches
+  -> PatchPreprocess gene/morphology preprocessing
+  -> HiST training and evaluation
+```
+
+If you use the downloadable processed datasets linked above, start with
+[Quick start](#quick-start). To prepare your own data, follow the
+[gene and morphology preprocessing guide](https://github.com/wwyi1828/PatchPreprocess#gene-and-morphology-preprocessing).
+
 
 The unified preprocessing path expects HEST-style inputs:
 
@@ -178,7 +199,7 @@ Raw-patch training uses `imge_RAW/` instead of `imge_UNI/`. Dataset locations ar
 declared in [`configs/dataset_config/`](configs/dataset_config); a path can also
 be overridden directly with Hydra.
 
-### H5 contract
+### H5 input format
 
 The gene and image files for a slide must have the same stem, number of rows,
 and spot order. Row `i` in every spot-level array must refer to the same barcode
@@ -188,7 +209,7 @@ reconstruct it.
 | File | Key | Status | Shape / dtype | Purpose |
 |---|---|---|---|---|
 | `gene/<slide>.h5` | `mol_feats` | Required | `[N, G]`, floating point | Non-negative expression in linear space. HiST applies `log1p` internally; do not store already-log-transformed targets. |
-| | `cords` | Required | `[N, 2]`, integer | Canonical non-negative, unique lattice coordinates used for evaluation and as the fallback training coordinates. The spelling is part of the current file format. |
+| | `cords` | Required | `[N, 2]`, integer | Canonical non-negative, unique lattice coordinates used for evaluation and as the fallback training coordinates. |
 | | `float_cords` | Required for coordinate augmentation | `[N, 2]`, float32 | Continuous near-lattice coordinates transformed before collision-free integer mapping. Without this key, training silently falls back to `cords`. |
 | | `union_gene_names` | Required by the default export path | `[G]`, strings | Gene names in exactly the same order as columns of `mol_feats`. |
 | | `hvg_indices` / `heg_indices` | Required when selected by `gene_type` | one-dimensional integer arrays | Ordered column indices used to select HVGs or HEGs. |
@@ -253,7 +274,7 @@ datasets:
     num_genes: 2000
 ```
 
-| Field | Contract |
+| Field | Description |
 |---|---|
 | `path` | Dataset root containing the gene and image-feature folders. |
 | `gene_dir` | Gene-file directory, relative to `path` or absolute. Defaults to `gene`. |
@@ -334,7 +355,7 @@ python -m tasks.gene_prediction.main \
 `model.lora_rank`, `model.lora_alpha`, and `model.lora_lr_mult` control Q/K
 adapter capacity, scaling, and learning rate.
 
-### Output contracts
+### Output files
 
 By default, aggregate metrics are written to:
 
@@ -441,11 +462,11 @@ At each resolution change, `model.global_strategy` controls the token path:
 | `kernel` | Reuse the local spatial operator's feature transform followed by its pooling rule. |
 
 Final encoder and decoder tokens are saved through the schema described in
-[Output contracts](#output-contracts).
+[Output files](#output-files).
 
 ### Operator and attention ablations
 
-The following options form the documented experiment surface:
+Use these options to compare spatial operators, attention, and skip connections:
 
 | Interface | Supported values | Notes |
 |---|---|---|
@@ -538,7 +559,7 @@ locations and remains aligned with same-resolution skip features.
 **Sparsity note.** Feature tensors and attention edges remain sparse, but some
 operators create an `H x W` integer ID or occupancy map over the tight coordinate
 bounding box. Memory is therefore sensitive to coordinate range as well as spot
-count. Compact lattice coordinates are part of the data contract.
+count. Compact lattice coordinates are required for efficient sparse operations.
 
 ### 4. Sparse window and global attention
 
