@@ -8,6 +8,14 @@
 Official PyTorch implementation of **HiST: A Hierarchical Sparse Transformer for
 Cross-Modal Spatial Transcriptomics Modeling** (ICML 2026).
 
+<p align="center">
+  <img
+    src="assets/hist_unet.gif"
+    width="100%"
+    alt="HiST U-Net style gene-expression prediction"
+  >
+</p>
+
 HiST predicts spatial gene expression from co-registered H&E histology patches.
 It models measured spatial-transcriptomics (ST) sites as a sparse field on a compact
 two-dimensional lattice, builds multiscale context with a sparse encoder-decoder,
@@ -18,14 +26,6 @@ and avoids materializing background tokens.
 > [Preprocessed Data (Google Drive)](https://drive.google.com/drive/folders/1N7yNi_QigARVNeOuxuzFia53UUTspAPd?usp=sharing) ·
 > [ST preprocessing](https://github.com/wwyi1828/PatchPreprocess#gene-and-morphology-preprocessing) ·
 > [SPAN](https://github.com/wwyi1828/SPAN)
-
-<p align="center">
-  <img
-    src="assets/hist_unet.gif"
-    width="100%"
-    alt="HiST U-Net style gene-expression prediction"
-  >
-</p>
 
 ## Highlights
 
