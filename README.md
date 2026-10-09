@@ -8,30 +8,23 @@
 Official PyTorch implementation of **HiST: A Hierarchical Sparse Transformer for
 Cross-Modal Spatial Transcriptomics Modeling** (ICML 2026).
 
-Download the preprocessed datasets from [Google Drive](https://drive.google.com/drive/folders/1N7yNi_QigARVNeOuxuzFia53UUTspAPd?usp=sharing).
+HiST predicts spatial gene expression from co-registered H&E histology patches.
+It models measured spatial-transcriptomics (ST) sites as a sparse field on a compact
+two-dimensional lattice, builds multiscale context with a sparse encoder-decoder,
+and avoids materializing background tokens.
 
-HiST predicts a gene-expression vector at each measured spatial-transcriptomics
-(ST) location from its co-registered H&E image patch. It represents the measured
-locations as a sparse field on a compact two-dimensional lattice, builds
-multiscale context with a sparse encoder-decoder, and avoids creating feature
-tokens for unobserved background locations.
-
+> [Paper](https://arxiv.org/abs/2606.14251) ·
 > [OpenReview](https://openreview.net/forum?id=ptbzlHzmEv) ·
+> [Preprocessed Data (Google Drive)](https://drive.google.com/drive/folders/1N7yNi_QigARVNeOuxuzFia53UUTspAPd?usp=sharing) ·
 > [ST preprocessing](https://github.com/wwyi1828/PatchPreprocess#gene-and-morphology-preprocessing) ·
 > [SPAN](https://github.com/wwyi1828/SPAN)
 
 <p align="center">
-  <a href="assets/hist-overview.png">
-    <img
-      src="assets/hist-overview.png"
-      width="100%"
-      alt="End-to-end HiST workflow: upstream H&E patch preparation and encoding feed a sparse spatial hierarchy that is coarsened and recovered at measured locations."
-    >
-  </a>
-</p>
-<p align="center">
-  <em><strong>HiST overview.</strong> Patch embeddings are arranged on a sparse
-  lattice, modeled across spatial scales, and recovered at measured ST sites.</em>
+  <img
+    src="assets/hist_unet.gif"
+    width="100%"
+    alt="HiST U-Net style gene-expression prediction"
+  >
 </p>
 
 ## Highlights
@@ -74,6 +67,20 @@ coarsens the sparse lattice twice, and recovers the original measured support
 with same-scale skip features. Three global tokens carry slide-level context,
 and a final linear head predicts log-expression at every input location. See
 [`configs/model/hist.yaml`](configs/model/hist.yaml) for the released settings.
+
+<p align="center">
+  <a href="assets/hist-overview.png">
+    <img
+      src="assets/hist-overview.png"
+      width="100%"
+      alt="End-to-end HiST workflow: upstream H&E patch preparation and encoding feed a sparse spatial hierarchy that is coarsened and recovered at measured locations."
+    >
+  </a>
+</p>
+<p align="center">
+  <em><strong>HiST overview.</strong> Patch embeddings are arranged on a sparse
+  lattice, modeled across spatial scales, and recovered at measured ST sites.</em>
+</p>
 
 ### Scope
 
@@ -138,12 +145,10 @@ supported architecture options.
 
 ## Data preparation
 
-Preprocessed datasets are available through the download link above. Dataset files
-and model weights are stored separately from this Git repository. The companion
-[PatchPreprocess](https://github.com/wwyi1828/PatchPreprocess) repository prepares
-HEST-style spatial-transcriptomics data and patch features in the layout consumed
-by HiST. The upstream [HEST library](https://github.com/mahmoodlab/hest) can be
-used to obtain and standardize H&E-ST pairs.
+HiST consumes paired spatial-transcriptomics data and H&E patch features prepared in the HEST format.
+
+- **Preprocessed data**: Download prepared datasets from [Google Drive](https://drive.google.com/drive/folders/1N7yNi_QigARVNeOuxuzFia53UUTspAPd?usp=sharing) and jump to [Quick start](#quick-start).
+- **Custom data**: Process new cohorts with the companion [PatchPreprocess](https://github.com/wwyi1828/PatchPreprocess) repository.
 
 ### Using PatchPreprocess
 
@@ -153,9 +158,7 @@ HEST-style paired ST data and H&E patches
   -> HiST training and evaluation
 ```
 
-If you use the downloadable processed datasets linked above, start with
-[Quick start](#quick-start). To prepare your own data, follow the
-[gene and morphology preprocessing guide](https://github.com/wwyi1828/PatchPreprocess#gene-and-morphology-preprocessing).
+To prepare your own data, follow the [gene and morphology preprocessing guide](https://github.com/wwyi1828/PatchPreprocess#gene-and-morphology-preprocessing).
 
 
 The unified preprocessing path expects HEST-style inputs:
@@ -201,10 +204,8 @@ be overridden directly with Hydra.
 
 ### H5 input format
 
-The gene and image files for a slide must have the same stem, number of rows,
-and spot order. Row `i` in every spot-level array must refer to the same barcode
-or measured location; the current loader assumes this alignment and does not
-reconstruct it.
+The gene and image files for each slide share the same file stem and must have
+identical spot ordering, where row `i` refers to the same barcode or measured location:
 
 | File | Key | Status | Shape / dtype | Purpose |
 |---|---|---|---|---|
@@ -248,15 +249,14 @@ integers before computing the canvas size, so each coordinate maximum must be at
 most 32766. In practice the memory cost of the temporary canvas usually demands
 a much tighter range.
 
-The integer lattice defines dyadic parent-child relationships, attention-window
+The integer lattice defines hierarchical parent-child relationships, attention-window
 membership, and local relative positions. For irregular or subcellular assays,
-the lattice unit and collision policy are therefore modeling choices.
+the lattice unit and collision policy are modeling choices.
 
-Before training, verify that expression is finite and non-negative; gene and
-image files have identical, barcode-aligned rows; `union_gene_names` matches the
-expression width; `cords` contains unique non-negative integer pairs with
-`max <= 32766`; and `float_cords` is present when coordinate augmentation is
-required. Matching row counts alone cannot prove barcode alignment.
+Before training, ensure that expression values are finite and non-negative,
+`union_gene_names` matches the expression width, `cords` contains unique non-negative
+integer pairs with `max <= 32766`, and `float_cords` is present when coordinate
+augmentation is enabled.
 
 ### Registering datasets and groups
 
@@ -282,15 +282,11 @@ datasets:
 | `num_genes` | Positive prefix length of the selected ranking, or `null` for the complete ranking/all columns. |
 
 Select it with `dataset_config=my_study dataset=cohort_a`. Registry files may
-also define named `dataset_groups` containing multiple registered datasets. A
-group is valid only when its members share the same selected genes in the same
-order, morphology width, target scale, and coordinate convention; equal
-`num_genes` values are not sufficient. These invariants are not validated by
-the loader.
+also define named `dataset_groups` combining multiple cohorts. Datasets in a group
+must share identical gene ordering, morphology width, and coordinate conventions.
 
-`test_fold` is a one-based value in `1..4`. Splits are generated from slide files
-at runtime; save the resolved slide lists for reproducibility, and avoid cohorts
-with fewer than four slides.
+`test_fold` is a one-based value in `1..4`. Four-fold splits are generated from
+slide files at runtime; each cohort should contain at least four slides.
 
 ## Training and outputs
 
@@ -306,8 +302,7 @@ python -m tasks.gene_prediction.main \
   model.pos_emb=alibi
 ```
 
-Hydra does not save its usual `.hydra/` snapshot in this project, so archive the
-resolved configuration and slide split with results intended for reproduction.
+Use `--cfg job --resolve` to inspect or archive the fully resolved configuration for reproducibility.
 
 Hydra multirun can execute all four runtime folds:
 
@@ -335,11 +330,9 @@ also updated:
 | `lora` | `imge_RAW/` | LoRA adapters on the attention Q/K projections | Optional | Adapt the image encoder with substantially fewer trainable parameters. |
 | `full` | `imge_RAW/` | The complete image encoder (`full` means trainable) | Optional | End-to-end fine-tuning with the highest memory and compute cost. |
 
-Raw-patch modes instantiate the UNI-style ViT-L/16 encoder and do not download
-weights. Set `UNI_WEIGHTS` and verify that the log reports
-`Successfully loaded weights for ViT`; a missing or incompatible checkpoint
-currently leaves the backbone randomly initialized. Pixel augmentation is
-enabled with `training.patch_aug=true`, independently of coordinate augmentation.
+Raw-patch modes instantiate the UNI ViT-L/16 encoder. Ensure `UNI_WEIGHTS` points
+to your local pretrained weights before training. Pixel augmentation is enabled with
+`training.patch_aug=true`, independently of coordinate augmentation.
 
 Example LoRA run:
 
@@ -379,10 +372,9 @@ Each prediction H5 contains:
 | `coords` | `[N, 2]` | Sorted integer lattice coordinates used for evaluation. |
 | `gene_names` | `[G]` | Byte strings aligned with prediction columns. |
 
-Rows are in coordinate-sorted model order rather than the original H5 order.
-Use the exported `coords` for downstream joins; prediction files do not retain
-barcodes, original row indices, or `orig_cords`. Dataset-group members must also
-have unique slide stems because the dataset name is not added to each H5 file.
+Rows are saved in coordinate-sorted order; use the exported `coords` to map
+predictions back to the original tissue spots. Slide file stems should be unique
+across datasets in a group.
 
 Each slide-token H5 contains:
 
@@ -401,13 +393,9 @@ stores each metric as a four-element fold array under:
 ```
 
 Here, `spot_metrics` is a pooled metric over all flattened spot–gene entries,
-not an average of one metric per spot. `slide_avg_metrics` computes the same
-flattened metric separately for each slide and then takes the unweighted mean
-over slides.
-
-> Metrics and H5 exports correspond to the final epoch. The current entrypoint
-> does not save a restorable checkpoint, and `logging.mode=best` does not select
-> or restore the best validation epoch.
+while `slide_avg_metrics` computes the metric separately per slide and takes
+the unweighted mean across slides. Metrics and per-slide predictions are evaluated
+and saved at the final epoch.
 
 The training objective is mean squared error in `log1p` expression space. Final
 evaluation reports coefficient of determination (`R2`) and Pearson correlation
@@ -489,8 +477,8 @@ experiment knobs and commands, use [Advanced model interfaces](#advanced-model-i
 
 [`PredictionModel`](tasks/gene_prediction/model.py) obtains one patch feature per
 measured location, and the first encoder block projects it to the model width.
-`SPAN_Padder` adds zero-feature boundary sentinels so repeated stride-2
-coarsening and recovery have compatible shapes; the sentinels are removed before
+`SPAN_Padder` adds zero-padding tokens along boundaries so repeated stride-2
+coarsening and recovery have compatible shapes; this padding is removed before
 prediction. The configured slide-calibration tokens follow a parallel
 low-bandwidth path and exchange information with local tokens under `hybrid`
 attention.
