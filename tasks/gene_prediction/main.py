@@ -135,12 +135,10 @@ def build_model_components(cfg: DictConfig, num_genes: int):
         n_layers=ds_layers, pad_feats=None
     )
     encoder_blocks = [
-        create_block(config, i + 1, mask_padding=True)
-        for i, config in enumerate(encoder_config)
+        create_block(config) for config in encoder_config
     ]
     decoder_blocks = [
-        create_block(config, len(decoder_config) - i)
-        for i, config in enumerate(decoder_config)
+        create_block(config) for config in decoder_config
     ]
 
     slide_encoder = SPAN_Encoder(

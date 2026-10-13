@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from .layers.attention import AttentionBuilder
 from .layers.transformer import TransformerLayer
-from .layers.convolution import ConvolutionLayer
+from .layers.convolution import ConvolutionLayer, SentinelState
 from timm.layers import trunc_normal_
 
 class SkipConnection(nn.Module):
@@ -32,20 +32,15 @@ class SkipConnection(nn.Module):
         return feat, global_feat
 
 class SPAN_Block(nn.Module):
-    def __init__(self, config, layer_index=0, mask_padding=False):
+    def __init__(self, config):
         super(SPAN_Block, self).__init__()
         self.config = config
         self.execution_order = []
         self.modules_dict = nn.ModuleDict()
 
-        if mask_padding:
-            self.mask_padding = (layer_index == 0)
-        else:
-            self.mask_padding = False
+        self._build_modules(config)
 
-        self._build_modules(config, layer_index)
-
-    def _build_modules(self, config, layer_index):
+    def _build_modules(self, config):
 
         attn_builder = None
 
@@ -63,8 +58,6 @@ class SPAN_Block(nn.Module):
                 conv_layers = []
                 for conv_config in value:
                     conv_config = conv_config.copy()
-                    if self.mask_padding:
-                        conv_config['mask_padding'] = True
                     conv_layers.append(ConvolutionLayer(**conv_config))
 
                 module_name = f'convs_{len(self.execution_order)}'
@@ -74,8 +67,6 @@ class SPAN_Block(nn.Module):
             elif key == 'attn_builder':
 
                 attn_config = value.copy()
-                if self.mask_padding:
-                    attn_config['mask_padding'] = True
                 attn_builder = AttentionBuilder(**attn_config)
 
                 self.execution_order.append(('attn_builder', attn_builder))
@@ -108,6 +99,8 @@ class SPAN_Block(nn.Module):
         global_feat_history=None,
         return_pre_skip_global_feat=False,
     ):
+        if pos_dict is None:
+            pos_dict = SentinelState(torch.zeros(feat.size(0), dtype=torch.bool, device=feat.device))
         pre_skip_feat = None
         pre_skip_global_feat = None
 
@@ -125,7 +118,10 @@ class SPAN_Block(nn.Module):
             elif step_type == 'attn_builder':
 
                 attn_builder = step[1]
-                compute_1, compute_2 = attn_builder(ins_pos, global_feat.size(0), mode=attn_builder.mode)
+                compute_1, compute_2 = attn_builder(
+                    ins_pos, global_feat.size(0), mode=attn_builder.mode,
+                    sentinel_mask=pos_dict.sentinel_mask,
+                )
 
             elif step_type == 'trans':
 
@@ -134,6 +130,7 @@ class SPAN_Block(nn.Module):
 
                 for trans_layer in trans_layers:
                     feat, global_feat = trans_layer(feat, global_feat, g1=compute_1, g2=compute_2, ins_pos=attn_builder.positions)
+                    feat = feat.masked_fill(pos_dict.sentinel_mask[:, None], 0)
 
             elif step_type == 'skipc':
                 if return_pre_skip_global_feat and pre_skip_global_feat is None:
@@ -149,9 +146,9 @@ class SPAN_Block(nn.Module):
             return ins_pos, feat, global_feat, spatial_shape, pos_dict, pre_skip_feat, pre_skip_global_feat
         return ins_pos, feat, global_feat, spatial_shape, pos_dict
 
-def create_block(config, layer_index, mask_padding=False):
+def create_block(config):
 
-    return SPAN_Block(config, layer_index, mask_padding)
+    return SPAN_Block(config)
 
 class SPAN_Encoder(nn.Module):
     def __init__(self, blocks, embed_dim, token_init_types):
@@ -223,15 +220,21 @@ class SPAN_Encoder(nn.Module):
         else:
             self.learnable_tokens = nn.ParameterList()
 
-    def forward(self, ins_pos, feat):
+    def forward(self, ins_pos, feat, sentinel_mask=None):
+        if sentinel_mask is None:
+            sentinel_mask = torch.zeros(feat.size(0), dtype=torch.bool, device=feat.device)
+        sentinel_mask = sentinel_mask.to(feat.device)
+        pos_dict = SentinelState(sentinel_mask)
+        feat = feat.masked_fill(sentinel_mask[:, None], 0)
+        pooled_feat = feat[~sentinel_mask]
         tokens = []
         for kind, idx in self.token_specs:
             if kind == "max":
-                tokens.append(feat.max(dim=0, keepdim=True)[0])
+                tokens.append(pooled_feat.max(dim=0, keepdim=True)[0])
             elif kind == "mean":
-                tokens.append(feat.mean(dim=0, keepdim=True))
+                tokens.append(pooled_feat.mean(dim=0, keepdim=True))
             elif kind == "std":
-                tokens.append(feat.std(dim=0, keepdim=True))
+                tokens.append(pooled_feat.std(dim=0, keepdim=True))
             elif kind == "rand":
                 tokens.append(self.random_tokens[idx:idx + 1])
             elif kind == "fix":
@@ -248,7 +251,6 @@ class SPAN_Encoder(nn.Module):
         global_feats = []
         coords = []
         spatial_shape = (ins_pos.int().max(dim=0)[0]+1).tolist()
-        pos_dict = None
         for idx, block in enumerate(self.blocks):
             ins_pos, feat, global_feat, spatial_shape, pos_dict = block(ins_pos, feat, global_feat=global_feat,
                                                                         spatial_shape=spatial_shape, pos_dict=pos_dict)

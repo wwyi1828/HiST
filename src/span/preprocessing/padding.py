@@ -74,7 +74,12 @@ class SPAN_Padder:
             shift = torch.tensor([pad_left, pad_top], dtype=pos.dtype, device=pos.device)
             new_pos = new_pos + shift
 
-        return new_pos, all_new_feats[0] if not is_list else all_new_feats
+        sentinel_mask = torch.zeros(new_pos.size(0), dtype=torch.bool, device=pos.device)
+        if pad_left > 0 or pad_top > 0:
+            sentinel_mask[0] = True
+        if pad_right > 0 or pad_bottom > 0:
+            sentinel_mask[-1] = True
+        return new_pos, all_new_feats[0] if not is_list else all_new_feats, sentinel_mask
 
     def __call__(self, pos, feats):
 

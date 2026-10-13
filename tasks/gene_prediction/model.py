@@ -43,10 +43,10 @@ class PredictionModel(nn.Module):
         image_features = self.patch_encoder(batch.mor_feats)
         spot_positions = batch.cords if hasattr(batch, 'cords') else None
 
-        spot_positions, [image_features] = self.padder(spot_positions, [image_features])
+        spot_positions, [image_features], sentinel_mask = self.padder(spot_positions, [image_features])
 
         ins_pos, image_feats_multi, global_feats, spatial_shape, pos_dict = self.slide_encoder(
-            spot_positions, image_features
+            spot_positions, image_features, sentinel_mask=sentinel_mask
         )
 
         if return_slide_token:
@@ -63,7 +63,7 @@ class PredictionModel(nn.Module):
                 ins_pos[-1], image_feats_multi, global_feats, spatial_shape, pos_dict
             )
 
-        final_prediction = self.segmentor(decoded_feats[-1])[1:-1]
+        final_prediction = self.segmentor(decoded_feats[-1])[~pos_dict.sentinel_mask]
         gene_features = batch.mol_feats
         total_loss = F.mse_loss(final_prediction, torch.log1p(gene_features))
 
