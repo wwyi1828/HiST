@@ -11,9 +11,9 @@ from lib.utils.entrypoint import initialize_hydra_run
 from lib.utils.data import split_datasets
 from lib.utils.model_utils import format_token_init_types
 from lib.utils.metrics import validate_gene_metrics
-from .dataset import HiSTDataset, custom_collate_fn
+from .dataset import HiSTDataset
+from .model import PredictionModel
 from torch.utils.data import DataLoader
-import torch.nn as nn
 from src.span.model import create_block, SPAN_Encoder, SPAN_Decoder
 from src.span.builders import build_model_config
 from .trainer import train_gene_prediction
@@ -42,7 +42,7 @@ def prepare_datasets(cfg: DictConfig) -> Tuple:
             )
 
         dataset_cfg = cfg.datasets[dataset_name]
-        src_folder = Path(dataset_cfg.path)
+        src_folder = Path(dataset_cfg.path).resolve()
         gene_type = dataset_cfg.get('gene_type', None)
         num_genes = dataset_cfg.get('num_genes', None)
 
@@ -93,28 +93,26 @@ def prepare_datasets(cfg: DictConfig) -> Tuple:
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=1,
+        batch_size=None,
         shuffle=True,
-        collate_fn=custom_collate_fn,
         num_workers=cfg.training.num_workers,
-        prefetch_factor=8,
-        persistent_workers=True
+        prefetch_factor=8 if cfg.training.num_workers > 0 else None,
+        persistent_workers=cfg.training.num_workers > 0
     )
     test_loader = DataLoader(
         test_dataset,
-        batch_size=1,
+        batch_size=None,
         shuffle=False,
-        collate_fn=custom_collate_fn
     )
 
     num_genes = cfg.datasets[dataset_names[0]].get('num_genes', None)
     if num_genes is None:
         sample = train_dataset[0]
-        num_genes = sample.mol_feats.shape[1] if hasattr(sample, 'mol_feats') else None
+        num_genes = sample.mol_feats.shape[1]
 
     return train_loader, test_loader, num_genes, image_suffix
 
-def build_model_components(cfg: DictConfig, num_genes: int):
+def build_model(cfg: DictConfig, num_genes: int, image_suffix: str):
 
     in_channels = 1280 if cfg.patch_backbone == 'V2' else 1024
 
@@ -147,9 +145,7 @@ def build_model_components(cfg: DictConfig, num_genes: int):
         token_init_types=token_init_types
     )
     decoder = SPAN_Decoder(decoder_blocks)
-    segmentor = nn.Identity()
-
-    return encoder_config, decoder_config, model_components, padder, slide_encoder, decoder, segmentor
+    return PredictionModel(padder, slide_encoder, decoder, image_suffix=image_suffix, cfg=cfg)
 
 @hydra.main(version_base=None, config_path="../../configs", config_name="gene_prediction")
 def main(cfg: DictConfig) -> None:
@@ -168,29 +164,21 @@ def main(cfg: DictConfig) -> None:
 
 
     print("Building model components...")
-    (encoder_config, decoder_config, model_components,
-     padder, slide_encoder, decoder, segmentor) = build_model_components(cfg, num_genes)
-
-    gene_transform = lambda x: x
+    model = build_model(cfg, num_genes, image_suffix)
 
     model_config = build_model_config_string(cfg)
 
     print("Starting training...")
-    best_metrics, model = train_gene_prediction(
+    final_metrics = train_gene_prediction(
         cfg=cfg,
+        model=model,
         train_loader=train_loader,
         test_loader=test_loader,
-        image_suffix=image_suffix,
-        gene_transform=gene_transform,
-        padder=padder,
-        slide_encoder=slide_encoder,
-        decoder=decoder,
-        segmentor=segmentor,
         model_config=model_config,
     )
 
     print("Saving results...")
-    save_results_to_json(cfg, best_metrics)
+    save_results_to_json(cfg, final_metrics)
 
     print("\n" + "="*60)
     print("Training completed successfully!")
@@ -214,7 +202,7 @@ def build_model_config_string(cfg: DictConfig) -> str:
         f"{token_init_str}"
     )
 
-def save_results_to_json(cfg: DictConfig, best_metrics: dict) -> None:
+def save_results_to_json(cfg: DictConfig, final_metrics: dict) -> None:
     from lib.utils.logging import update_results_file
 
     eval_metrics = cfg.training.eval_metrics
@@ -237,7 +225,7 @@ def save_results_to_json(cfg: DictConfig, best_metrics: dict) -> None:
             }
 
         for metric_type in ['spot_metrics', 'slide_avg_metrics']:
-            for metric_name, metric_value in best_metrics.get(metric_type, {}).items():
+            for metric_name, metric_value in final_metrics[metric_type].items():
                 if metric_name not in results[run_name][model_config][metric_type]:
                     results[run_name][model_config][metric_type][metric_name] = [None, None, None, None]
                 results[run_name][model_config][metric_type][metric_name][idx] = metric_value

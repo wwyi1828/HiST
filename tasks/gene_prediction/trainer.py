@@ -1,256 +1,161 @@
 import os
 import random
+
+import h5py
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from omegaconf import DictConfig
 
 from lib.utils.coord_aug import update_coord_aug_multiplier
-import h5py
 from lib.utils.metrics import compute_gene_metrics
 from lib.utils.wandb_helper import create_logger
-from .model import PredictionModel
 
-def train_one_epoch(model, data_loader, optimizer, device, cfg, gene_transform, epoch=None):
 
+def train_one_epoch(model, data_loader, optimizer, device, cfg, epoch=None):
     model.train()
     total_loss = 0
-
     desc = f"Epoch {epoch}/{cfg.training.epochs}" if epoch is not None else "Training"
     progress_bar = tqdm(data_loader, desc=desc, leave=False)
 
-    for batch_idx, batch in enumerate(progress_bar):
-
-        if isinstance(batch.mor_feats, torch.Tensor):
-            img_feats = batch.mor_feats.to(device)
-        if isinstance(batch.mol_feats, torch.Tensor):
-            gene_hvg = batch.mol_feats.to(device)
-            gene_hvg = gene_transform(gene_hvg)
-
-        if isinstance(batch.final_cords, torch.Tensor):
-            final_cords = batch.final_cords.to(device)
-
+    for batch in progress_bar:
+        img_feats = batch.mor_feats.to(device)
+        gene_targets = batch.mol_feats.to(device)
+        final_cords = batch.final_cords.to(device)
         total_samples = img_feats.size(0)
-        sub_batch_size = cfg.training.sub_batch_size if cfg.training.sub_batch_size is not None else total_samples
+        sub_batch_size = (cfg.training.sub_batch_size
+                          if cfg.training.sub_batch_size is not None else total_samples)
         accumulate_steps = cfg.training.accumulate_steps
 
         optimizer.zero_grad()
         batch_loss = 0
         num_sub_batches = 0
-
         extended_size = int(sub_batch_size * 1.1)
         current_idx = 0
 
         while current_idx < total_samples:
             remaining = total_samples - current_idx
-
             if remaining >= extended_size:
                 start_offset = random.randint(0, extended_size - sub_batch_size)
                 selected_indices = list(range(
                     current_idx + start_offset,
-                    current_idx + start_offset + sub_batch_size
+                    current_idx + start_offset + sub_batch_size,
                 ))
             elif remaining >= sub_batch_size:
                 selected_indices = list(range(current_idx, current_idx + sub_batch_size))
             else:
                 backward_needed = sub_batch_size - remaining
-
                 if current_idx >= backward_needed:
-                    backward_indices = list(range(current_idx - backward_needed, current_idx))
-                    forward_indices = list(range(current_idx, total_samples))
-                    selected_indices = backward_indices + forward_indices
+                    selected_indices = (list(range(current_idx - backward_needed, current_idx))
+                                        + list(range(current_idx, total_samples)))
                 else:
                     selected_indices = list(range(total_samples))
 
-            sub_batch = type('', (), {})()
-            sub_batch.mor_feats = img_feats[selected_indices]
-            sub_batch.mol_feats = gene_hvg[selected_indices]
-            sub_batch.cords = final_cords[selected_indices]
+            log_prediction = model(final_cords[selected_indices], img_feats[selected_indices])
+            loss = F.mse_loss(log_prediction, torch.log1p(gene_targets[selected_indices]))
+            (loss / accumulate_steps).backward()
+            batch_loss += loss.item()
+            num_sub_batches += 1
 
-            _, loss = model(sub_batch)
-            if loss is not None:
-                scaled_loss = loss / accumulate_steps
-                scaled_loss.backward()
-                batch_loss += loss.item()
-                num_sub_batches += 1
-
-            if remaining <= extended_size:
-                current_idx = total_samples
-            else:
-                current_idx += extended_size
-
-            is_last_sub_batch = (current_idx >= total_samples)
-            should_step = (num_sub_batches % accumulate_steps == 0) or is_last_sub_batch
-
-            if should_step and num_sub_batches > 0:
+            current_idx = total_samples if remaining <= extended_size else current_idx + extended_size
+            if num_sub_batches % accumulate_steps == 0 or current_idx >= total_samples:
                 optimizer.step()
                 optimizer.zero_grad()
 
-        if num_sub_batches > 0:
-            avg_batch_loss = batch_loss / num_sub_batches
-            total_loss += avg_batch_loss
-            progress_bar.set_postfix(loss=avg_batch_loss)
+        avg_batch_loss = batch_loss / num_sub_batches
+        total_loss += avg_batch_loss
+        progress_bar.set_postfix(loss=avg_batch_loss)
 
     return total_loss / len(data_loader)
+
 
 def evaluate(
     model,
     data_loader,
     device,
     cfg,
-    gene_transform,
     compute_metrics=True,
     save_dir=None,
     slide_token_save_dir=None,
 ):
-
     model.eval()
     total_loss = 0
-    num_batches = 0
-
     eval_metrics = cfg.training.eval_metrics
     slide_metrics = {metric: [] for metric in eval_metrics}
-
     all_predictions = []
     all_targets = []
 
-    gene_names = None
-    token_init_types = None
-    if save_dir or slide_token_save_dir:
-        if save_dir:
-            os.makedirs(save_dir, exist_ok=True)
-        if slide_token_save_dir:
-            os.makedirs(slide_token_save_dir, exist_ok=True)
-        sample = data_loader.dataset[0]
-        gene_names_full = sample.union_gene_names
-        item = data_loader.dataset.slide_items[0]
-        gene_type = item[2]
-        num_genes_val = item[3]
-        if gene_type == 'hvg' and hasattr(sample, 'hvg_indices'):
-            indices = sample.hvg_indices[:num_genes_val].tolist() if num_genes_val else sample.hvg_indices.tolist()
-            gene_names = [gene_names_full[i] for i in indices]
-        elif gene_type == 'heg' and hasattr(sample, 'heg_indices'):
-            indices = sample.heg_indices[:num_genes_val].tolist() if num_genes_val else sample.heg_indices.tolist()
-            gene_names = [gene_names_full[i] for i in indices]
-        else:
-            gene_names = gene_names_full
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+    if slide_token_save_dir:
+        os.makedirs(slide_token_save_dir, exist_ok=True)
         token_init_types = np.asarray(
-            [str(t) for t in getattr(model.slide_encoder, 'token_init_types', [])],
-            dtype='S',
+            [str(t) for t in model.slide_encoder.token_init_types], dtype='S',
         )
 
     with torch.no_grad():
         for batch in tqdm(data_loader, desc="Evaluating", leave=False):
-
-            if isinstance(batch.mor_feats, torch.Tensor):
-                img_feats = batch.mor_feats.to(device)
-            if isinstance(batch.mol_feats, torch.Tensor):
-                gene_hvg = batch.mol_feats.to(device)
-                gene_hvg = gene_transform(gene_hvg)
-
-            if isinstance(batch.final_cords, torch.Tensor):
-                final_cords = batch.final_cords.to(device)
-
-            total_samples = img_feats.size(0)
-            sub_batch_size = total_samples
-
-            batch_loss = 0
-            num_sub_batches = 0
-
-            slide_predictions = []
-            slide_targets = []
+            img_feats = batch.mor_feats.to(device)
+            gene_targets = batch.mol_feats.to(device)
+            final_cords = batch.final_cords.to(device)
             slide_token = None
+            if slide_token_save_dir:
+                log_prediction, slide_token = model(final_cords, img_feats, return_slide_token=True)
+            else:
+                log_prediction = model(final_cords, img_feats)
+            loss = F.mse_loss(log_prediction, torch.log1p(gene_targets))
+            total_loss += loss.item()
 
-            for start_idx in range(0, total_samples, sub_batch_size):
-                end_idx = min(start_idx + sub_batch_size, total_samples)
+            if not compute_metrics:
+                continue
 
-                sub_batch = type('', (), {})()
-                sub_batch.mor_feats = img_feats[start_idx:end_idx]
-                sub_batch.mol_feats = gene_hvg[start_idx:end_idx]
-                sub_batch.cords = final_cords[start_idx:end_idx]
+            predictions = torch.expm1(log_prediction).relu().cpu().numpy()
+            targets = gene_targets.cpu().numpy()
+            all_predictions.append(predictions)
+            all_targets.append(targets)
 
-                if slide_token_save_dir:
-                    predictions, loss, slide_token = model(sub_batch, return_slide_token=True)
-                else:
-                    predictions, loss = model(sub_batch)
+            if save_dir:
+                with h5py.File(os.path.join(save_dir, f"{batch.slide_name}.h5"), 'w') as file:
+                    file.create_dataset('predictions', data=predictions)
+                    file.create_dataset('targets', data=targets)
+                    file.create_dataset('coords', data=batch.final_cords.numpy())
+                    file.create_dataset('gene_names', data=np.asarray(batch.gene_names, dtype='S'))
+            if slide_token_save_dir and slide_token is not None:
+                with h5py.File(os.path.join(slide_token_save_dir, f"{batch.slide_name}.h5"), 'w') as file:
+                    file.create_dataset('slide_token', data=slide_token.cpu().numpy())
+                    file.create_dataset('token_init_types', data=token_init_types)
 
-                if compute_metrics:
-                    slide_predictions.append(predictions.cpu().numpy())
-                    slide_targets.append(sub_batch.mol_feats.cpu().numpy())
+            values = compute_gene_metrics(targets.ravel(), predictions.ravel(), metrics=eval_metrics)
+            for name, value in values.items():
+                slide_metrics[name].append(value)
 
-                    all_predictions.append(predictions.cpu().numpy())
-                    all_targets.append(sub_batch.mol_feats.cpu().numpy())
-
-                if loss is not None:
-                    batch_loss += loss.item()
-                    num_sub_batches += 1
-
-            if num_sub_batches > 0:
-                avg_batch_loss = batch_loss / num_sub_batches
-                total_loss += avg_batch_loss
-                num_batches += 1
-
-                if compute_metrics:
-                    slide_predictions = np.vstack(slide_predictions) if slide_predictions else np.array([])
-                    slide_targets = np.vstack(slide_targets) if slide_targets else np.array([])
-
-                    if save_dir:
-                        with h5py.File(os.path.join(save_dir, f"{batch.slide_name}.h5"), 'w') as f:
-                            f.create_dataset('predictions', data=slide_predictions)
-                            f.create_dataset('targets', data=slide_targets)
-                            f.create_dataset('coords', data=batch.final_cords.cpu().numpy())
-                            f.create_dataset('gene_names', data=np.array(gene_names, dtype='S'))
-                    if slide_token_save_dir and slide_token is not None:
-                        with h5py.File(os.path.join(slide_token_save_dir, f"{batch.slide_name}.h5"), 'w') as f:
-                            f.create_dataset('slide_token', data=slide_token.cpu().numpy())
-                            f.create_dataset('token_init_types', data=token_init_types)
-
-                    slide_metric_values = compute_gene_metrics(
-                        slide_targets.flatten(),
-                        slide_predictions.flatten(),
-                        metrics=eval_metrics
-                    )
-
-                    for metric_name, metric_value in slide_metric_values.items():
-                        slide_metrics[metric_name].append(metric_value)
-
-    avg_slide_metrics = {metric_name: np.mean(values) for metric_name, values in slide_metrics.items()} if compute_metrics else {}
-    std_slide_metrics = {metric_name: np.std(values) for metric_name, values in slide_metrics.items()} if compute_metrics else {}
-
+    mean_metrics = {}
+    std_metrics = {}
+    spot_metrics = {}
     if compute_metrics:
-        all_predictions = np.vstack(all_predictions)
-        all_targets = np.vstack(all_targets)
-
-        spot_level_metrics = compute_gene_metrics(
-            all_targets.flatten(),
-            all_predictions.flatten(),
-            metrics=eval_metrics
+        mean_metrics = {name: np.mean(values) for name, values in slide_metrics.items()}
+        std_metrics = {name: np.std(values) for name, values in slide_metrics.items()}
+        spot_metrics = compute_gene_metrics(
+            np.vstack(all_targets).ravel(), np.vstack(all_predictions).ravel(), metrics=eval_metrics,
         )
-
         print("\nSlide-Level Evaluation Metrics (Mean ± Std):")
-        for metric_name in avg_slide_metrics:
-            print(f"{metric_name}: {avg_slide_metrics[metric_name]:.4f} ± {std_slide_metrics[metric_name]:.4f}")
-
+        for name in mean_metrics:
+            print(f"{name}: {mean_metrics[name]:.4f} ± {std_metrics[name]:.4f}")
         print("\nSpot-Level Evaluation Metrics:")
-        for metric_name, metric_value in spot_level_metrics.items():
-            print(f"{metric_name}: {metric_value:.4f}")
-    else:
-        spot_level_metrics = {}
+        for name, value in spot_metrics.items():
+            print(f"{name}: {value:.4f}")
 
-    return total_loss / max(num_batches, 1), avg_slide_metrics, std_slide_metrics, spot_level_metrics
+    return total_loss / len(data_loader), mean_metrics, std_metrics, spot_metrics
+
 
 def train_gene_prediction(
     cfg: DictConfig,
     train_loader,
     test_loader,
-    image_suffix,
-    gene_transform,
-    padder,
-    slide_encoder,
-    decoder,
-    segmentor,
+    model,
     model_config,
 ):
 
@@ -268,14 +173,7 @@ def train_gene_prediction(
 
     logger = create_logger(cfg)
 
-    model = PredictionModel(
-        padder=padder,
-        slide_encoder=slide_encoder,
-        decoder=decoder,
-        segmentor=segmentor,
-        image_suffix=image_suffix,
-        cfg=cfg
-    ).to(device)
+    model.to(device)
 
     if cfg.training.slide_pretrained:
         ckpt_root = os.environ.get('HIST_CKPT_ROOT', './checkpoints')
@@ -328,15 +226,10 @@ def train_gene_prediction(
     eta_min_factor = cfg.training.get('eta_min_factor', 0.0)
     scheduler = CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=cfg.training.lr * eta_min_factor)
 
-    best_val_loss = float('inf')
-    final_spot_metrics = None
-    final_avg_slide_metrics = None
-    final_std_slide_metrics = None
-
     for epoch in range(1, cfg.training.epochs + 1):
         update_coord_aug_multiplier(cfg, train_loader, epoch, cfg.training.epochs)
 
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, cfg, gene_transform, epoch)
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, cfg, epoch)
 
         compute_metrics = (epoch == cfg.training.epochs)
 
@@ -367,21 +260,21 @@ def train_gene_prediction(
                 )
                 if compute_metrics and cfg.logging.results.get("save_predictions", True) else None
             )
-            val_loss, avg_slide_metrics, std_slide_metrics, spot_level_metrics = evaluate(
+            val_loss, avg_slide_metrics, _, spot_level_metrics = evaluate(
                 model,
                 test_loader,
                 device,
                 cfg,
-                gene_transform,
                 compute_metrics=compute_metrics,
                 save_dir=save_dir,
                 slide_token_save_dir=slide_token_save_dir,
             )
 
             if compute_metrics:
-                final_spot_metrics = spot_level_metrics
-                final_avg_slide_metrics = avg_slide_metrics
-                final_std_slide_metrics = std_slide_metrics
+                final_metrics = {
+                    'spot_metrics': spot_level_metrics,
+                    'slide_avg_metrics': {k: float(v) for k, v in avg_slide_metrics.items()},
+                }
 
             if logger:
                 logger.log_epoch(epoch, {"train/loss": float(train_loss), "val/loss": float(val_loss)})
@@ -393,13 +286,8 @@ def train_gene_prediction(
 
     print("Training completed!")
 
-    best_metrics = {
-        'spot_metrics': final_spot_metrics,
-        'slide_avg_metrics': {k: float(v) for k, v in final_avg_slide_metrics.items()},
-    }
-
     if logger:
-        logger.log_best(best_metrics)
+        logger.log_final(final_metrics)
         logger.finish()
 
-    return best_metrics, model
+    return final_metrics

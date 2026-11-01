@@ -1,8 +1,6 @@
-# Result-saving mode: "best" | "epoch" | "disabled"
-mode: "best"
-
 wandb:
   enabled: true
+  mode: "online"  # "online" | "offline"
   project: "HiST"
   entity: null  # Set your W&B entity (e.g. "your-username")
   tags: []

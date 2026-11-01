@@ -101,7 +101,6 @@ class SPAN_Block(nn.Module):
     ):
         if pos_dict is None:
             pos_dict = SentinelState(torch.zeros(feat.size(0), dtype=torch.bool, device=feat.device))
-        pre_skip_feat = None
         pre_skip_global_feat = None
 
         for step in self.execution_order:
@@ -134,16 +133,14 @@ class SPAN_Block(nn.Module):
 
             elif step_type == 'skipc':
                 if return_pre_skip_global_feat and pre_skip_global_feat is None:
-                    pre_skip_feat = feat
                     pre_skip_global_feat = global_feat
                 skip_modules = step[1]
                 feat, global_feat = skip_modules(feat, global_feat, feat_history, global_feat_history)
 
         if return_pre_skip_global_feat:
             if pre_skip_global_feat is None:
-                pre_skip_feat = feat
                 pre_skip_global_feat = global_feat
-            return ins_pos, feat, global_feat, spatial_shape, pos_dict, pre_skip_feat, pre_skip_global_feat
+            return ins_pos, feat, global_feat, spatial_shape, pos_dict, pre_skip_global_feat
         return ins_pos, feat, global_feat, spatial_shape, pos_dict
 
 def create_block(config):
@@ -265,84 +262,36 @@ class SPAN_Decoder(nn.Module):
         self.blocks = nn.ModuleList(blocks)
 
     def forward(self, ins_pos, feat, global_feat, spatial_shape, pos_dict, return_pre_output_global_feat=False):
-        decoded_feats = []
-        coords = []
-        if isinstance(feat, list):
-            target_device = feat[-1].device
-        else:
-            target_device = feat.device
-        ins_pos = ins_pos.to(target_device)
-        target_idx = len(self.blocks) - 2 if len(self.blocks) > 1 else len(self.blocks) - 1
+        current_feat = feat[-1]
+        current_global_feat = global_feat[-1]
+        ins_pos = ins_pos.to(current_feat.device)
+        target_idx = max(len(self.blocks) - 2, 0)
+        pre_output_global_feat = current_global_feat
 
-        if not isinstance(feat, list):
-            current_global_feat = global_feat
-            pre_output_global_feat = current_global_feat
-            for idx, block in enumerate(self.blocks):
-                current_feat = feat
-                if return_pre_output_global_feat and idx == target_idx and idx != len(self.blocks) - 1:
-                    (
-                        ins_pos,
-                        current_feat,
-                        current_global_feat,
-                        spatial_shape,
-                        pos_dict,
-                        _,
-                        pre_output_global_feat,
-                    ) = block(
-                        ins_pos,
-                        current_feat,
-                        global_feat=current_global_feat,
-                        spatial_shape=spatial_shape,
-                        pos_dict=pos_dict,
-                        return_pre_skip_global_feat=True,
-                    )
-                else:
-                    if return_pre_output_global_feat and idx == target_idx:
-                        pre_output_global_feat = current_global_feat
-                    ins_pos, current_feat, current_global_feat, spatial_shape, pos_dict = block(
-                        ins_pos, current_feat, global_feat=current_global_feat,
-                        spatial_shape=spatial_shape, pos_dict=pos_dict
-                    )
-                decoded_feats.append(current_feat)
-                coords.append(ins_pos)
-            if return_pre_output_global_feat:
-                return coords, decoded_feats, pre_output_global_feat
-            return coords, decoded_feats
-        else:
-            current_feat = feat[-1]
-            current_global_feat = global_feat[-1]
-            pre_output_global_feat = current_global_feat
-            for idx, block in enumerate(self.blocks):
-                if return_pre_output_global_feat and idx == target_idx and idx != len(self.blocks) - 1:
-                    (
-                        ins_pos,
-                        current_feat,
-                        current_global_feat,
-                        spatial_shape,
-                        pos_dict,
-                        _,
-                        pre_output_global_feat,
-                    ) = block(
-                        ins_pos,
-                        current_feat,
-                        global_feat=current_global_feat,
-                        spatial_shape=spatial_shape,
-                        pos_dict=pos_dict,
-                        feat_history=feat,
-                        global_feat_history=global_feat,
-                        return_pre_skip_global_feat=True,
-                    )
-                else:
-                    if return_pre_output_global_feat and idx == target_idx:
-                        pre_output_global_feat = current_global_feat
-                    ins_pos, current_feat, current_global_feat, spatial_shape, pos_dict = block(
-                        ins_pos, current_feat, global_feat=current_global_feat,
-                        spatial_shape=spatial_shape, pos_dict=pos_dict,
-                        feat_history=feat, global_feat_history=global_feat
-                    )
-                decoded_feats.append(current_feat)
-                coords.append(ins_pos)
+        for idx, block in enumerate(self.blocks):
+            if return_pre_output_global_feat and idx == target_idx and idx != len(self.blocks) - 1:
+                (
+                    ins_pos,
+                    current_feat,
+                    current_global_feat,
+                    spatial_shape,
+                    pos_dict,
+                    pre_output_global_feat,
+                ) = block(
+                    ins_pos, current_feat, global_feat=current_global_feat,
+                    spatial_shape=spatial_shape, pos_dict=pos_dict,
+                    feat_history=feat, global_feat_history=global_feat,
+                    return_pre_skip_global_feat=True,
+                )
+            else:
+                if return_pre_output_global_feat and idx == target_idx:
+                    pre_output_global_feat = current_global_feat
+                ins_pos, current_feat, current_global_feat, spatial_shape, pos_dict = block(
+                    ins_pos, current_feat, global_feat=current_global_feat,
+                    spatial_shape=spatial_shape, pos_dict=pos_dict,
+                    feat_history=feat, global_feat_history=global_feat,
+                )
 
         if return_pre_output_global_feat:
-            return coords, decoded_feats, pre_output_global_feat
-        return coords, decoded_feats
+            return current_feat, pre_output_global_feat
+        return current_feat

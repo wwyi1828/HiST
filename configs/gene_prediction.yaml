@@ -11,7 +11,6 @@ defaults:
 dataset: "NCBI_brain"
 dataset_group: null
 test_fold: 1
-target_datasets: null
 
 # ========== Patch backbone ==========
 patch_backbone: "UNI"
@@ -75,13 +74,6 @@ training:
 
 # ========== Logging & results ==========
 logging:
-  mode: "best"  # "best" | "epoch" | "disabled"
-  wandb:
-    enabled: true
-    project: "HiST"
-    entity: null  # Set your W&B entity here
-    tags: []
-    notes: ""
   results:
     dir: "./results/gene_prediction"
     save_path: "hist"

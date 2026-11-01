@@ -70,38 +70,34 @@ class PatchEncoder(nn.Module):
         for p in self.model.parameters():
             p.requires_grad = trainable
 
-        if use_lora and normalized_name == 'vit_large_patch16_224':
-            if LoRALayer is None:
-                print("Warning: LoRA requested but LoRA module not available. Skipping LoRA.")
-                use_lora = False
-            else:
-                self.lora_layers = {}
+        if use_lora:
+            self.lora_layers = {}
 
-                for name, module in self.model.named_modules():
-                    if 'attn.qkv' in name:
-                        hidden_size = module.weight.shape[1]
-                        out_features = module.weight.shape[0]
-                        query_key_dim = (out_features * 2) // 3
+            for name, module in self.model.named_modules():
+                if 'attn.qkv' in name:
+                    hidden_size = module.weight.shape[1]
+                    out_features = module.weight.shape[0]
+                    query_key_dim = (out_features * 2) // 3
 
-                        lora_name = name.replace('.', '_')
-                        self.lora_layers[lora_name] = LoRALayer(
-                            hidden_size, query_key_dim,
-                            rank=lora_rank, alpha=lora_alpha
-                        )
+                    lora_name = name.replace('.', '_')
+                    self.lora_layers[lora_name] = LoRALayer(
+                        hidden_size, query_key_dim,
+                        rank=lora_rank, alpha=lora_alpha
+                    )
 
-                for name, layer in self.lora_layers.items():
-                    self.add_module(f"lora_{name}", layer)
+            for name, layer in self.lora_layers.items():
+                self.add_module(f"lora_{name}", layer)
 
-                num_lora_params = 0
-                for name, param in self.named_parameters():
-                    if 'lora_' in name:
-                        param.requires_grad = lora_trainable
-                        num_lora_params += 1
+            num_lora_params = 0
+            for name, param in self.named_parameters():
+                if 'lora_' in name:
+                    param.requires_grad = lora_trainable
+                    num_lora_params += 1
 
-                print(f"Added LoRA (rank={lora_rank}, alpha={lora_alpha}) to {len(self.lora_layers)} attention layers")
-                print(f"LoRA parameters: {num_lora_params} ({'trainable' if lora_trainable else 'frozen'})")
+            print(f"Added LoRA (rank={lora_rank}, alpha={lora_alpha}) to {len(self.lora_layers)} attention layers")
+            print(f"LoRA parameters: {num_lora_params} ({'trainable' if lora_trainable else 'frozen'})")
 
-                self._store_orig_forward_methods()
+            self._store_orig_forward_methods()
 
         self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
         self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
@@ -123,8 +119,7 @@ class PatchEncoder(nn.Module):
                 def make_forward(orig_module, lora):
                     def forward(x):
                         orig_output = orig_module._original_forward(x)
-                        batch_size, seq_len, hidden_dim = orig_output.shape
-                        qkv_dim = hidden_dim // 3
+                        qkv_dim = orig_output.shape[-1] // 3
 
                         lora_output = lora(x)
 

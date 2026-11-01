@@ -406,6 +406,11 @@ subset can be selected through `training.eval_metrics`.
 
 The options below are the supported Hydra controls for architecture experiments.
 
+Call a `PredictionModel` instance as `model(coords, features)` to get log-expression
+with shape `[N, G]`. Set `return_slide_token=True` to also return slide embeddings.
+Training computes MSE against `log1p` targets; evaluation converts predictions
+to linear expression with `expm1` and ReLU.
+
 ### Topology DSL
 
 `model.slide_configs` is a compact depth-per-resolution string:
@@ -598,7 +603,7 @@ to inspect every setting. The primary experiment controls are:
 | `training.init_bias_with_mean` | Initialize gene-head bias from mean training-fold `log1p` expression. |
 | `training.coord_aug`, `training.patch_aug` | Coordinate and raw-patch augmentation. |
 | `training.eval_metric_freq`, `training.eval_metrics` | Evaluation interval and final `R2`/`PCC` metrics. |
-| `logging.wandb.enabled` | Enable or disable Weights & Biases. |
+| `logging.wandb.enabled`, `logging.wandb.mode` | Enable Weights & Biases and choose `online` or `offline` logging. |
 | `logging.results.dir`, `logging.results.save_path`, `logging.results.save_predictions` | Result namespace and per-slide export control. |
 
 ## Repository map

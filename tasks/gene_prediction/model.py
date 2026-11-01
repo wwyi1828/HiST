@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from lib.backbones import PatchEncoder
 
 class PredictionModel(nn.Module):
@@ -9,7 +8,6 @@ class PredictionModel(nn.Module):
         padder,
         slide_encoder,
         decoder,
-        segmentor,
         image_suffix='RAW',
         cfg=None,
     ):
@@ -30,27 +28,24 @@ class PredictionModel(nn.Module):
                 use_lora=use_lora,
                 lora_rank=cfg.model.lora_rank,
                 lora_alpha=cfg.model.lora_alpha,
-                lora_trainable=True if use_lora else False,
+                lora_trainable=use_lora,
                 patch_aug=cfg.training.patch_aug
             )
 
         self.padder = padder
         self.slide_encoder = slide_encoder
         self.decoder = decoder
-        self.segmentor = segmentor
 
-    def forward(self, batch, return_slide_token=False):
-        image_features = self.patch_encoder(batch.mor_feats)
-        spot_positions = batch.cords if hasattr(batch, 'cords') else None
-
-        spot_positions, [image_features], sentinel_mask = self.padder(spot_positions, [image_features])
+    def forward(self, spot_positions, image_features, return_slide_token=False):
+        image_features = self.patch_encoder(image_features)
+        spot_positions, image_features, sentinel_mask = self.padder(spot_positions, image_features)
 
         ins_pos, image_feats_multi, global_feats, spatial_shape, pos_dict = self.slide_encoder(
             spot_positions, image_features, sentinel_mask=sentinel_mask
         )
 
         if return_slide_token:
-            output_pos, decoded_feats, decoder_global_feat = self.decoder(
+            decoded_feats, decoder_global_feat = self.decoder(
                 ins_pos[-1],
                 image_feats_multi,
                 global_feats,
@@ -59,16 +54,11 @@ class PredictionModel(nn.Module):
                 return_pre_output_global_feat=True,
             )
         else:
-            output_pos, decoded_feats = self.decoder(
+            decoded_feats = self.decoder(
                 ins_pos[-1], image_feats_multi, global_feats, spatial_shape, pos_dict
             )
 
-        final_prediction = self.segmentor(decoded_feats[-1])[~pos_dict.sentinel_mask]
-        gene_features = batch.mol_feats
-        total_loss = F.mse_loss(final_prediction, torch.log1p(gene_features))
-
-        prediction = torch.expm1(final_prediction)
-        prediction = F.relu(prediction)
+        log_prediction = decoded_feats[~pos_dict.sentinel_mask]
 
         if return_slide_token:
             slide_token_parts = []
@@ -85,6 +75,6 @@ class PredictionModel(nn.Module):
                 slide_token = torch.cat(slide_token_parts, dim=0)
             else:
                 slide_token = None
-            return prediction, total_loss, slide_token
+            return log_prediction, slide_token
 
-        return prediction, total_loss
+        return log_prediction
