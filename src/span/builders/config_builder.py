@@ -107,6 +107,17 @@ def build_model_config(cfg, num_genes, in_channels=1024, enc_act='relu'):
         'token_init_types': token_init_types
     }
 
+    sparse_backend = cfg.model.get('sparse_backend', 'auto')
+    if sparse_backend not in ('auto', 'torch', 'triton'):
+        raise ValueError('sparse_backend must be auto/torch/triton')
+    for block in encoder_config + decoder_config:
+        for kind, layers in block:
+            if kind == 'convs':
+                for layer in layers:
+                    layer['sparse_backend'] = sparse_backend
+            elif kind == 'attn_builder':
+                layers['backend'] = sparse_backend
+
     return encoder_config, decoder_config, model_components
 
 def _build_encoder_config(encoder_config_string, in_channels, embed_dim,

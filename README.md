@@ -104,9 +104,13 @@ python -m pip install --upgrade pip
 pip install -e .
 ```
 
-The model uses PyTorch and DGL. If the default resolver does not select builds
-compatible with your CUDA runtime, install the matching PyTorch and DGL builds
-first, then run `pip install -e .`.
+Convolution, resampling, and attention now use custom GPU kernels on CUDA through
+Triton, making inference and training faster than the previous release. The
+default `model.sparse_backend=auto` selects these kernels when Triton
+is available and uses PyTorch otherwise, including on CPU. Use
+`model.sparse_backend=torch` to select the PyTorch implementation or
+`model.sparse_backend=triton` to request the CUDA kernels explicitly. Install a
+PyTorch build compatible with your CUDA runtime before running `pip install -e .`.
 
 For raw-patch modes with the UNI encoder, obtain the weights under the
 [UNI terms of use](https://github.com/mahmoodlab/UNI) and set:
@@ -241,13 +245,9 @@ lossless coordinate transform. HiST's runtime mapper rounds near-lattice points,
 resolves collisions by assigning an unused nearby grid site, and translates the
 result so that both coordinate minima are zero.
 
-Integer dtype alone is not sufficient. Do not pass unnormalized WSI pixel
-coordinates directly: large gaps create an unnecessarily large lookup canvas,
-and duplicate coordinates overwrite the one-site/one-token correspondence.
-The current attention rulebook casts lattice coordinates to signed 16-bit
-integers before computing the canvas size, so each coordinate maximum must be at
-most 32766. In practice the memory cost of the temporary canvas usually demands
-a much tighter range.
+Use compact lattice coordinates rather than raw WSI pixel positions: lookup-map
+memory scales with the coordinate extent. Each lattice site must contain one
+token, so coordinates must be unique.
 
 The integer lattice defines hierarchical parent-child relationships, attention-window
 membership, and local relative positions. For irregular or subcellular assays,
@@ -255,7 +255,7 @@ the lattice unit and collision policy are modeling choices.
 
 Before training, ensure that expression values are finite and non-negative,
 `union_gene_names` matches the expression width, `cords` contains unique non-negative
-integer pairs with `max <= 32766`, and `float_cords` is present when coordinate
+integer pairs on a compact lattice, and `float_cords` is present when coordinate
 augmentation is enabled.
 
 ### Registering datasets and groups
@@ -460,7 +460,8 @@ Use these options to compare spatial operators, attention, and skip connections:
 |---|---|---|
 | `model.econvs_type` | `patchconv` (default), `dwpatchconv`, `patchmerge` | Sparse encoder coarsening; `patchmerge` uses canonical four-child slots. |
 | `model.dconvs_type` | `pixelshuffle` (default), `patchinvs` | Sparse decoder recovery intersected with cached active support. |
-| `model.trans_type`, `model.dtrans_type` | `hybrid` (default), `hybrid_noshift`, `swin` | `hybrid_noshift` removes shifted windows but keeps global exchange; `swin` uses regular/shifted local graphs without local–global edges. |
+| `model.trans_type`, `model.dtrans_type` | `hybrid` (default), `hybrid_noshift`, `swin` | `hybrid_noshift` removes shifted windows but keeps global exchange; `swin` uses regular/shifted local attention without local–global edges. |
+| `model.sparse_backend` | `auto` (default), `torch`, `triton` | Select the implementation for spatial operators and attention. |
 | `model.pos_emb` | `rpb` (default), `alibi`, `rope`, `none` | Learned relative bias, 2D distance ALiBi, 2D rotary Q/K, or an ablation without positional encoding. |
 | `model.connection` | `concat` (default), `add`, `none` | Encoder–decoder skip fusion. |
 | `model.edge_mode` | `none` (default), `count`, `partial` | Optional incomplete-neighborhood normalization for sparse patch convolution. |
@@ -539,10 +540,9 @@ projected to the next-stage width.
 </p>
 
 Before coarsening, the encoder caches the active support at each resolution.
-Sparse pixel shuffle expands every parent feature into four candidate children,
-maps them to `2 * parent + offset`, and keeps only candidates present in the
-matching cached support. Recovery therefore returns predictions only at measured
-locations and remains aligned with same-resolution skip features.
+Sparse pixel shuffle uses `2 * parent + offset` to recover child features directly
+at the matching cached support. Recovery therefore returns predictions only at
+measured locations and remains aligned with same-resolution skip features.
 
 **Sparsity note.** Feature tensors and attention edges remain sparse, but some
 operators create an `H x W` integer ID or occupancy map over the tight coordinate
@@ -551,18 +551,17 @@ count. Compact lattice coordinates are required for efficient sparse operations.
 
 ### 4. Sparse window and global attention
 
-[`AttentionBuilder`](src/span/layers/attention.py) scatters active token IDs onto
-a tight lattice map, partitions occupied sites into regular and shifted windows,
-and creates DGL edges only between valid token pairs. Under `hybrid` attention,
-a second graph adds local-to-global, global-to-local, and global-to-global
+[`AttentionBuilder`](src/span/layers/attention.py) partitions occupied sites into
+regular and shifted windows and caches their token indices. Under `hybrid`
+attention, a second path adds local-to-global, global-to-local, and global-to-global
 interactions. `window_size` is a half-side parameter, so the released value `3`
 produces `6 x 6` lattice windows.
 
-[`TransformerLayer`](src/span/layers/transformer.py) computes Q/K/V projections,
-scores only graph edges, normalizes incoming edges with DGL `edge_softmax`, and
-aggregates values by message passing. It never instantiates a dense `N x N`
+[`TransformerLayer`](src/span/layers/transformer.py) computes Q/K/V projections.
+The attention kernels score valid token pairs, normalize scores over each query's
+neighbors, and aggregate values. They never instantiate a dense `N x N`
 attention matrix. Repeated Transformer layers in the same configured stage reuse
-the stage's constructed graphs.
+the stage's cached attention plans.
 
 Local attention supports learned relative positional bias (`rpb`, the default),
 2D distance-based ALiBi, 2D RoPE, or no positional encoding. RPB and ALiBi are
@@ -609,7 +608,8 @@ to inspect every setting. The primary experiment controls are:
 | [`configs/`](configs) | Hydra task, model, dataset, and logging configuration. |
 | [`tasks/gene_prediction/`](tasks/gene_prediction) | H5 loading, model assembly, training, evaluation, and export. |
 | [`src/span/`](src/span) | Hierarchical sparse encoder-decoder and configuration builder. |
-| [`src/span/layers/`](src/span/layers) | Sparse resolution changes, graph attention, Transformers, and positional encoding. |
+| [`src/span/layers/`](src/span/layers) | Sparse resolution changes, attention, Transformers, and positional encoding. |
+| [`src/span/ops/`](src/span/ops) | Custom GPU kernels and PyTorch implementations for spatial operators and attention. |
 | [`src/span/preprocessing/`](src/span/preprocessing) | Padding, coordinate transforms, integer mapping, and spatial utilities. |
 | [`lib/backbones/`](lib/backbones) | Raw-patch UNI encoder, pixel augmentation, and LoRA injection. |
 | [`lib/utils/`](lib/utils) | Coordinate augmentation, fold splitting, metrics, and result logging. |

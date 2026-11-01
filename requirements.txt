@@ -10,4 +10,3 @@ h5py
 hydra-core
 omegaconf
 wandb
-dgl

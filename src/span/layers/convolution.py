@@ -5,7 +5,6 @@ from timm.layers import DropPath
 from ..functional import create_activation
 
 class SentinelState(list):
-    """Spatial snapshots with an explicit mask for the current padding nodes."""
 
     def __init__(self, sentinel_mask):
         super().__init__()
@@ -20,32 +19,6 @@ def _sentinel_state(pos_dict, feat):
     pos_dict.sentinel_mask = pos_dict.sentinel_mask.to(feat.device)
     return pos_dict
 
-def _conv_neighborhood_indices(coord, spatial_shape, out_coord, conv):
-    k_h, k_w = _to_pair(conv.kernel_size)
-    s_h, s_w = _to_pair(conv.stride)
-    d_h, d_w = _to_pair(conv.dilation)
-    offsets = _kernel_offsets(k_h, k_w, d_h, d_w, coord.device)
-    in_y = out_coord[:, 0, None] * s_h + offsets[:, 0][None, :]
-    in_x = out_coord[:, 1, None] * s_w + offsets[:, 1][None, :]
-    return _build_index_map(coord, spatial_shape)[in_y, in_x].long()
-
-def _real_neighbors(indices, sentinel_mask):
-    padded_mask = torch.cat([sentinel_mask.new_ones(1), sentinel_mask])
-    return (indices > 0) & ~padded_mask[indices]
-
-def _normalize_edges(out_feat, present, conv, edge_mode, edge_eps):
-    has_real_input = present.any(dim=1, keepdim=True)
-    if edge_mode == 'count':
-        denom = present.to(out_feat.dtype).sum(dim=1, keepdim=True)
-        denom = torch.where(has_real_input, denom.clamp(min=edge_eps), torch.ones_like(denom))
-        return out_feat / denom
-    if edge_mode == 'partial':
-        weights = conv.weight.abs().sum(dim=1).reshape(conv.out_channels, -1)
-        denom = present.to(out_feat.dtype) @ weights.t()
-        denom = torch.where(has_real_input, denom.clamp(min=edge_eps), torch.ones_like(denom))
-        return out_feat / denom
-    return out_feat
-
 def _canonical_norm_position(norm_position):
     value = str(norm_position or 'post').strip().lower()
     if value not in {'pre', 'post'}:
@@ -57,65 +30,6 @@ def _pre_norm(dim, norm_position):
 
 def _post_norm(dim, norm_position):
     return nn.LayerNorm(dim) if _canonical_norm_position(norm_position) == 'post' else nn.Identity()
-
-def _build_dense(coord, feat, spatial_shape):
-    dense = feat.new_zeros(spatial_shape + [feat.shape[-1]])
-    dense[coord[:, 0], coord[:, 1]] = feat
-    return dense
-
-def _build_mask(coord, spatial_shape, dtype=torch.float32):
-    mask = torch.zeros(spatial_shape, dtype=dtype, device=coord.device)
-    mask[coord[:, 0], coord[:, 1]] = 1
-    return mask
-
-def _gather_by_mask(dense_feat, mask):
-    out_coord = torch.nonzero(mask)
-    out_feat = dense_feat[out_coord[:, 0], out_coord[:, 1]]
-    spatial_shape = [*mask.shape[:2]]
-    return out_coord, out_feat, spatial_shape
-
-def dense_ConvwithMM(conv, global_feat, pool):
-    kernel_size = conv.kernel_size[0] if isinstance(conv.kernel_size, tuple) else conv.kernel_size
-    dilation = conv.dilation[0] if isinstance(conv.dilation, tuple) else conv.dilation
-    padding = conv.padding[0] if isinstance(conv.padding, tuple) else conv.padding
-
-    expanded_height = kernel_size + (kernel_size - 1) * (dilation - 1)
-    expanded_width = kernel_size + (kernel_size - 1) * (dilation - 1)
-
-    global_feat_expanded = global_feat.unsqueeze(-1).unsqueeze(-1)
-    global_feat_expanded = global_feat_expanded.expand(-1, -1, expanded_height, expanded_width)
-
-    conv_out = conv(global_feat_expanded)
-    if pool == 'sum':
-        global_feat = conv_out.sum([-1, -2])
-    elif pool == 'mean':
-        global_feat = conv_out.mean([-1, -2])
-    elif pool == 'max':
-        global_feat = conv_out.amax(dim=[-1, -2])
-    return global_feat
-
-def _to_pair(val):
-    if isinstance(val, (list, tuple)):
-        return int(val[0]), int(val[1])
-    return int(val), int(val)
-
-def _conv_out_size(length, kernel, stride, dilation):
-    return (length - dilation * (kernel - 1) - 1) // stride + 1
-
-def _kernel_offsets(k_h, k_w, d_h, d_w, device):
-    ys = torch.arange(k_h, device=device) * d_h
-    xs = torch.arange(k_w, device=device) * d_w
-    grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
-    return torch.stack([grid_y.reshape(-1), grid_x.reshape(-1)], dim=1)
-
-def _build_index_map(coord, spatial_shape):
-    coord = coord.long()
-    index_map = torch.zeros(spatial_shape, dtype=torch.int32, device=coord.device)
-    if coord.numel() == 0:
-        return index_map
-    flat = torch.arange(coord.shape[0], device=coord.device, dtype=torch.int32) + 1
-    index_map[coord[:, 0], coord[:, 1]] = flat
-    return index_map
 
 def _pack_sparse_mask(coord, spatial_shape):
     return {"coord": coord, "spatial_shape": [int(spatial_shape[0]), int(spatial_shape[1])]}
@@ -136,157 +50,9 @@ def _append_sparse_mask(pos_dict, coord, spatial_shape):
     pos_dict.append(entry)
     return pos_dict
 
-def _apply_conv_weight(neigh, conv):
-    weight = conv.weight
-    bias = conv.bias
-    n_out, k_len, c_in = neigh.shape
-    groups = conv.groups
-    out_channels = conv.out_channels
-
-    if groups == 1:
-        w = weight.view(out_channels, -1)
-        neigh_flat = neigh.permute(0, 2, 1).reshape(n_out, -1)
-        out = neigh_flat @ w.t()
-    else:
-        c_g = c_in // groups
-        o_g = out_channels // groups
-        neigh_g = neigh.view(n_out, k_len, groups, c_g).permute(0, 2, 1, 3)
-        k_h, k_w = weight.shape[2], weight.shape[3]
-        w_g = weight.view(groups, o_g, c_g, k_h * k_w).permute(0, 1, 3, 2)
-        out = torch.einsum('ngkc,gokc->ngo', neigh_g, w_g)
-        out = out.reshape(n_out, out_channels)
-
-    if bias is not None:
-        out = out + bias
-    return out
-
-def _apply_conv_transpose_weight(neigh, conv):
-    weight = conv.weight
-    bias = conv.bias
-    n_out, k_len, c_in = neigh.shape
-    groups = conv.groups
-    out_channels = conv.out_channels
-    k_h, k_w = weight.shape[2], weight.shape[3]
-
-    if groups == 1:
-        w = weight.view(c_in, out_channels, k_h * k_w).permute(0, 2, 1)
-        out = torch.einsum('nkc,cko->no', neigh, w)
-    else:
-        c_g = c_in // groups
-        o_g = out_channels // groups
-        neigh_g = neigh.view(n_out, k_len, groups, c_g).permute(0, 2, 1, 3)
-        w_g = weight.view(groups, c_g, o_g, k_h * k_w)
-        out = torch.einsum('ngkc,gcok->ngo', neigh_g, w_g)
-        out = out.reshape(n_out, out_channels)
-
-    if bias is not None:
-        out = out + bias
-    return out
-
-def _sparse_conv2d(coord, feat, spatial_shape, conv, edge_mode='none', edge_eps=1e-6,
-                   sentinel_mask=None):
-    coord = coord.long()
-    if sentinel_mask is None:
-        sentinel_mask = torch.zeros(coord.shape[0], dtype=torch.bool, device=feat.device)
-    else:
-        sentinel_mask = sentinel_mask.to(device=feat.device, dtype=torch.bool)
-    h_in, w_in = int(spatial_shape[0]), int(spatial_shape[1])
-    if coord.numel() == 0:
-        out_shape = [_conv_out_size(h_in, _to_pair(conv.kernel_size)[0], _to_pair(conv.stride)[0], _to_pair(conv.dilation)[0]),
-                     _conv_out_size(w_in, _to_pair(conv.kernel_size)[1], _to_pair(conv.stride)[1], _to_pair(conv.dilation)[1])]
-        return coord.new_zeros((0, 2)), feat.new_zeros((0, conv.out_channels)), out_shape
-
-    k_h, k_w = _to_pair(conv.kernel_size)
-    s_h, s_w = _to_pair(conv.stride)
-    d_h, d_w = _to_pair(conv.dilation)
-    h_out = _conv_out_size(h_in, k_h, s_h, d_h)
-    w_out = _conv_out_size(w_in, k_w, s_w, d_w)
-
-    if h_out <= 0 or w_out <= 0:
-        return coord.new_zeros((0, 2)), feat.new_zeros((0, conv.out_channels)), [h_out, w_out]
-
-    offsets = _kernel_offsets(k_h, k_w, d_h, d_w, coord.device)
-    delta = coord[:, None, :] - offsets[None, :, :]
-    valid = (delta[..., 0] >= 0) & (delta[..., 1] >= 0)
-    if s_h != 1:
-        valid &= (delta[..., 0] % s_h == 0)
-    if s_w != 1:
-        valid &= (delta[..., 1] % s_w == 0)
-    out_y = delta[..., 0] // s_h
-    out_x = delta[..., 1] // s_w
-    valid &= (out_y < h_out) & (out_x < w_out)
-    flat = (out_y * w_out + out_x)[valid]
-
-    if flat.numel() == 0:
-        return coord.new_zeros((0, 2)), feat.new_zeros((0, conv.out_channels)), [h_out, w_out]
-
-    flat = torch.unique(flat, sorted=True)
-    out_coord = torch.stack([flat // w_out, flat % w_out], dim=1)
-
-    index_map = _build_index_map(coord, spatial_shape)
-    in_y = out_coord[:, 0, None] * s_h + offsets[:, 0][None, :]
-    in_x = out_coord[:, 1, None] * s_w + offsets[:, 1][None, :]
-    idx = index_map[in_y, in_x]
-
-    feat = _zero_sentinels(feat, sentinel_mask)
-    feat_pad = torch.cat([feat.new_zeros(1, feat.shape[1]), feat], dim=0)
-    neigh = feat_pad[idx.long()]
-    out_feat = _apply_conv_weight(neigh, conv)
-
-    present = _real_neighbors(idx.long(), sentinel_mask)
-    out_feat = _normalize_edges(out_feat, present, conv, edge_mode, edge_eps)
-    out_feat = _zero_sentinels(out_feat, ~present.any(dim=1))
-
-    return out_coord, out_feat, [h_out, w_out]
-
-def _sparse_conv_transpose2d(coord, feat, spatial_shape, out_coord, conv):
-    coord = coord.long()
-    out_coord = out_coord.long()
-    h_in, w_in = int(spatial_shape[0]), int(spatial_shape[1])
-    if coord.numel() == 0 or out_coord.numel() == 0:
-        return feat.new_zeros((out_coord.shape[0], conv.out_channels))
-
-    k_h, k_w = _to_pair(conv.kernel_size)
-    s_h, s_w = _to_pair(conv.stride)
-    d_h, d_w = _to_pair(conv.dilation)
-    offsets = _kernel_offsets(k_h, k_w, d_h, d_w, out_coord.device)
-
-    delta = out_coord[:, None, :] - offsets[None, :, :]
-    valid = (delta[..., 0] >= 0) & (delta[..., 1] >= 0)
-    if s_h != 1:
-        valid &= (delta[..., 0] % s_h == 0)
-    if s_w != 1:
-        valid &= (delta[..., 1] % s_w == 0)
-    in_y = delta[..., 0] // s_h
-    in_x = delta[..., 1] // s_w
-    valid &= (in_y < h_in) & (in_x < w_in)
-
-    in_y_safe = torch.where(valid, in_y, torch.zeros_like(in_y))
-    in_x_safe = torch.where(valid, in_x, torch.zeros_like(in_x))
-
-    index_map = _build_index_map(coord, spatial_shape)
-    idx = index_map[in_y_safe, in_x_safe]
-    idx = torch.where(valid, idx, torch.zeros_like(idx))
-
-    feat_pad = torch.cat([feat.new_zeros(1, feat.shape[1]), feat], dim=0)
-    neigh = feat_pad[idx.long()]
-    out_feat = _apply_conv_transpose_weight(neigh, conv)
-
-    return out_feat
-
-def _pixelshuffle_expand(coord, feat, upscale_factor, out_channels, linear):
-    coord = coord.long()
-    if coord.numel() == 0:
-        return coord.new_zeros((0, 2)), feat.new_zeros((0, out_channels))
-    expanded = linear(feat)
-    expanded = expanded.view(coord.shape[0], out_channels, upscale_factor, upscale_factor)
-    expanded = expanded.permute(0, 2, 3, 1).reshape(coord.shape[0], upscale_factor * upscale_factor, out_channels)
-    offsets = _kernel_offsets(upscale_factor, upscale_factor, 1, 1, coord.device)
-    out_coord = coord[:, None, :] * upscale_factor + offsets[None, :, :]
-    out_coord = out_coord.reshape(-1, 2)
-    out_feat = expanded.reshape(-1, out_channels)
-    return out_coord, out_feat
-
+def _global_convolution(conv, global_feat, pool):
+    from ..ops.global_ops import global_convolution
+    return global_convolution(global_feat, conv, pool)
 
 def _init_pixel_shuffle_weight(weight: torch.Tensor, upscale_factor: int) -> None:
     if upscale_factor <= 1:
@@ -303,189 +69,131 @@ def _init_pixel_shuffle_weight(weight: torch.Tensor, upscale_factor: int) -> Non
         nn.init.kaiming_normal_(sub_weight, mode='fan_out', nonlinearity='relu')
         weight.copy_(sub_weight.repeat_interleave(scale, dim=0))
 
-class s_PatchConvBlock(nn.Module):
+class PatchConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, dilation, groups, bias,
-                 edge_mode='none', edge_eps=1e-6, norm_position='post'):
-        super(s_PatchConvBlock, self).__init__()
+                 edge_mode='none', edge_eps=1e-6, norm_position='post', backend='auto'):
+        super().__init__()
+        self.backend = backend
         self.input_norm = _pre_norm(in_channels, norm_position)
         self.output_norm = _post_norm(out_channels, norm_position)
-        self.dwconv = nn.Conv2d(in_channels, out_channels, kernel_size,
-                                stride=stride, dilation=dilation, padding=0,
-                                bias=bias, groups=groups)
-        self.edge_mode = edge_mode
-        self.edge_eps = edge_eps
+        self.dwconv = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride,
+                                dilation=dilation, padding=0, bias=bias, groups=groups)
+        self.edge_mode, self.edge_eps = edge_mode, edge_eps
 
     def forward(self, coord, feat, spatial_shape, pos_dict=None):
-        coord = coord.long()
+        from ..ops.convolution import sparse_conv2d
         pos_dict = _sentinel_state(pos_dict, feat)
         feat = _zero_sentinels(feat, pos_dict.sentinel_mask)
         feat = _zero_sentinels(self.input_norm(feat), pos_dict.sentinel_mask)
         pos_dict = _append_sparse_mask(pos_dict, coord, spatial_shape)
-        out_coord, out_feat, out_shape = _sparse_conv2d(
+        out_coord, out_feat, out_shape, sentinel, plan = sparse_conv2d(
             coord, feat, spatial_shape, self.dwconv, self.edge_mode, self.edge_eps,
-            sentinel_mask=pos_dict.sentinel_mask,
+            pos_dict.sentinel_mask, backend=self.backend,
         )
-        indices = _conv_neighborhood_indices(coord, spatial_shape, out_coord, self.dwconv)
-        pos_dict.sentinel_mask = ~_real_neighbors(indices, pos_dict.sentinel_mask).any(dim=1)
-        out_feat = _zero_sentinels(self.output_norm(out_feat), pos_dict.sentinel_mask)
+        pos_dict[-1]['plan'] = plan
+        pos_dict.sentinel_mask = sentinel
+        out_feat = _zero_sentinels(self.output_norm(out_feat), sentinel)
         return out_coord, out_feat, out_shape, pos_dict
 
     def conv_forward(self, global_feat, pool):
-        global_feat = self.input_norm(global_feat)
-        out = dense_ConvwithMM(self.dwconv, global_feat, pool)
-        out = self.output_norm(out)
-        return out
+        out = _global_convolution(self.dwconv, self.input_norm(global_feat), pool)
+        return self.output_norm(out)
 
-class s_PatchMerge(nn.Module):
+
+class PatchMerge(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, dilation, groups, bias,
-                 edge_mode='none', edge_eps=1e-6, norm_position='post'):
-        super(s_PatchMerge, self).__init__()
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.dilation = dilation
+                 edge_mode='none', edge_eps=1e-6, norm_position='post', backend='auto'):
+        super().__init__()
+        self.backend = backend
         self.input_norm = _pre_norm(in_channels * 4, norm_position)
         self.output_norm = _post_norm(out_channels, norm_position)
         self.pwconv = nn.Linear(in_channels * 4, out_channels, bias=bias)
-        self.edge_mode = edge_mode
-        self.edge_eps = edge_eps
+        self.edge_mode, self.edge_eps = edge_mode, edge_eps
 
     def forward(self, coord, feat, spatial_shape, pos_dict=None):
-        coord = coord.long()
+        from ..ops.resampling import sparse_patch_merge
         pos_dict = _sentinel_state(pos_dict, feat)
-        feat = _zero_sentinels(feat, pos_dict.sentinel_mask)
         pos_dict = _append_sparse_mask(pos_dict, coord, spatial_shape)
-        h_out = int(spatial_shape[0]) // 2
-        w_out = int(spatial_shape[1]) // 2
-
-        if coord.numel() == 0:
-            out_coord = coord.new_zeros((0, 2))
-            out_feat = feat.new_zeros((0, self.pwconv.out_features))
-            pos_dict.sentinel_mask = pos_dict.sentinel_mask.new_zeros(0)
-            return out_coord, out_feat, [h_out, w_out], pos_dict
-
-        out_coord_base = coord // 2
-        valid = (out_coord_base[:, 0] >= 0) & (out_coord_base[:, 1] >= 0)
-        valid &= (out_coord_base[:, 0] < h_out) & (out_coord_base[:, 1] < w_out)
-        out_coord_base = out_coord_base[valid]
-        feat = feat[valid]
-        sentinel_mask = pos_dict.sentinel_mask[valid]
-        offset = (coord[valid, 0] % 2) * 2 + (coord[valid, 1] % 2)
-
-        flat = out_coord_base[:, 0] * w_out + out_coord_base[:, 1]
-        unique_flat, inverse = torch.unique(flat, sorted=True, return_inverse=True)
-        out_coord = torch.stack([unique_flat // w_out, unique_flat % w_out], dim=1)
-
-        c_in = feat.shape[1]
-        out_feat_full = feat.new_zeros((out_coord.shape[0], 4 * c_in))
-        cols = offset[:, None] * c_in + torch.arange(c_in, device=feat.device)[None, :]
-        out_feat_full[inverse[:, None], cols] = feat
-
-        sentinel_slots = sentinel_mask.new_zeros((out_coord.shape[0], 4))
-        sentinel_slots[inverse, offset] = sentinel_mask
-        counts = feat.new_zeros(out_coord.shape[0])
-        counts.index_add_(0, inverse, (~sentinel_mask).to(counts.dtype))
-        pos_dict.sentinel_mask = counts == 0
-
-        if self.edge_mode and self.edge_mode != 'none':
-            counts = counts.clamp(min=1.0)
-            scale = (1.0 / counts.clamp(min=self.edge_eps)).unsqueeze(1)
-            out_feat_full = out_feat_full * scale
-
-        out_feat_full = self.input_norm(out_feat_full)
-        out_feat_full = out_feat_full.masked_fill(sentinel_slots.repeat_interleave(c_in, dim=1), 0)
-        out_feat = self.pwconv(out_feat_full)
-        out_feat = _zero_sentinels(out_feat, pos_dict.sentinel_mask)
-        out_feat = _zero_sentinels(self.output_norm(out_feat), pos_dict.sentinel_mask)
-        return out_coord, out_feat, [h_out, w_out], pos_dict
+        out_coord, out_feat, out_shape, sentinel, plan = sparse_patch_merge(
+            coord, feat, spatial_shape, self.pwconv, self.input_norm,
+            self.edge_mode, self.edge_eps, pos_dict.sentinel_mask, backend=self.backend,
+        )
+        pos_dict[-1]['plan'] = plan
+        pos_dict.sentinel_mask = sentinel
+        out_feat = _zero_sentinels(self.output_norm(out_feat), sentinel)
+        return out_coord, out_feat, out_shape, pos_dict
 
     def conv_forward(self, global_feat, pool):
         bsz, dim = global_feat.shape
         merged = global_feat.unsqueeze(-1).expand(bsz, dim, 4).reshape(bsz, 4 * dim)
-        merged = self.input_norm(merged)
-        out = self.pwconv(merged)
-        out = self.output_norm(out)
-        return out
+        return self.output_norm(self.pwconv(self.input_norm(merged)))
 
-class s_PatchInverseBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, dilation, groups, bias):
-        super(s_PatchInverseBlock, self).__init__()
+
+class PatchInverseBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, dilation, groups, bias,
+                 backend='auto'):
+        super().__init__()
+        self.backend = backend
         self.norm = nn.LayerNorm(out_channels)
         self.upconv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size,
                                          stride=stride, dilation=dilation, bias=bias, groups=groups)
-        self.pwconv = nn.Identity()
 
     def forward(self, coord, feat, spatial_shape, pos_dict):
-        if pos_dict is None or len(pos_dict) == 0:
-            raise ValueError("pos_dict is required for s_PatchInverseBlock")
+        from ..ops.convolution import sparse_conv_transpose2d
+        if pos_dict is None or not len(pos_dict):
+            raise ValueError('pos_dict is required for sparse transpose convolution')
         pos_dict = _sentinel_state(pos_dict, feat)
         feat = _zero_sentinels(feat, pos_dict.sentinel_mask)
         entry = pos_dict.pop()
         out_coord, out_shape = _unpack_sparse_mask(entry)
-        out_feat = _sparse_conv_transpose2d(coord, feat, spatial_shape, out_coord, self.upconv)
-        out_feat = self.pwconv(out_feat)
+        out_feat = sparse_conv_transpose2d(
+            coord, feat, spatial_shape, out_coord, self.upconv,
+            plan=entry.get('plan'), backend=self.backend,
+        )
         pos_dict.sentinel_mask = entry['sentinel_mask'].to(feat.device)
-        out_feat = _zero_sentinels(out_feat, pos_dict.sentinel_mask)
         out_feat = _zero_sentinels(self.norm(out_feat), pos_dict.sentinel_mask)
         return out_coord, out_feat, out_shape, pos_dict
 
     def conv_forward(self, global_feat, pool):
-        global_feat_expanded = global_feat.unsqueeze(-1).unsqueeze(-1)
-        global_feat_out = self.upconv(global_feat_expanded)
-        if pool == 'mean':
-            global_feat_out = torch.nn.functional.adaptive_avg_pool2d(global_feat_out, (1, 1))
-        elif pool == 'max':
-            global_feat_out = torch.nn.functional.adaptive_max_pool2d(global_feat_out, (1, 1))
+        from ..ops.global_ops import global_transpose
+        out = global_transpose(global_feat, self.upconv, pool)
+        return self.norm(out)
 
-        global_feat_out = global_feat_out.squeeze(-1).squeeze(-1)
-        global_feat_out = self.pwconv(global_feat_out)
-        global_feat_out = self.norm(global_feat_out)
-        return global_feat_out
 
-class s_PixelShuffle(nn.Module):
-    def __init__(self, in_channels, out_channels, stride, bias, norm_position='post'):
-        super(s_PixelShuffle, self).__init__()
-        self.upscale_factor = stride
-        self.out_channels = out_channels
+class PixelShuffle(nn.Module):
+    def __init__(self, in_channels, out_channels, stride, bias, norm_position='post', backend='auto'):
+        super().__init__()
+        self.backend = backend
+        self.upscale_factor, self.out_channels = stride, out_channels
         self.input_norm = _pre_norm(in_channels, norm_position)
         self.output_norm = _post_norm(out_channels, norm_position)
-        self.conv = nn.Linear(in_channels, out_channels * self.upscale_factor ** 2, bias=bias)
-        _init_pixel_shuffle_weight(self.conv.weight, self.upscale_factor)
+        self.conv = nn.Linear(in_channels, out_channels * stride ** 2, bias=bias)
+        _init_pixel_shuffle_weight(self.conv.weight, stride)
         if self.conv.bias is not None:
             nn.init.zeros_(self.conv.bias)
 
-    def forward(self, coord, feat, spatial_shape, pos_dict):
+    def forward(self, coord, feat, spatial_shape, pos_dict=None):
+        from ..ops.resampling import pixel_shuffle
         pos_dict = _sentinel_state(pos_dict, feat)
         feat = _zero_sentinels(feat, pos_dict.sentinel_mask)
         feat = _zero_sentinels(self.input_norm(feat), pos_dict.sentinel_mask)
-        if not pos_dict:
-            out_coord, out_feat = _pixelshuffle_expand(coord, feat, self.upscale_factor, self.out_channels, self.conv)
-            spatial_shape = [int(spatial_shape[0]) * self.upscale_factor, int(spatial_shape[1]) * self.upscale_factor]
-            pos_dict.sentinel_mask = pos_dict.sentinel_mask.repeat_interleave(self.upscale_factor ** 2)
-            out_feat = _zero_sentinels(out_feat, pos_dict.sentinel_mask)
-            out_feat = _zero_sentinels(self.output_norm(out_feat), pos_dict.sentinel_mask)
-            return out_coord, out_feat, spatial_shape, pos_dict
-
-        entry = pos_dict.pop()
-        target_coord, target_shape = _unpack_sparse_mask(entry)
-        all_coord, all_feat = _pixelshuffle_expand(coord, feat, self.upscale_factor, self.out_channels, self.conv)
-        all_feat = _zero_sentinels(all_feat, pos_dict.sentinel_mask.repeat_interleave(self.upscale_factor ** 2))
-        index_map = _build_index_map(all_coord, target_shape)
-        idx = index_map[target_coord[:, 0], target_coord[:, 1]]
-        valid = idx > 0
-        out_coord = target_coord[valid]
-        out_feat = all_feat[(idx[valid] - 1).long()]
-        pos_dict.sentinel_mask = entry['sentinel_mask'].to(feat.device)[valid]
-        out_feat = _zero_sentinels(out_feat, pos_dict.sentinel_mask)
-        out_feat = _zero_sentinels(self.output_norm(out_feat), pos_dict.sentinel_mask)
-        return out_coord, out_feat, target_shape, pos_dict
+        entry = pos_dict.pop() if len(pos_dict) else None
+        target, shape = _unpack_sparse_mask(entry) if entry is not None else (None, None)
+        out_coord, out_feat, out_shape, sentinel = pixel_shuffle(
+            coord, feat, spatial_shape, self.conv, self.upscale_factor, self.out_channels,
+            target_coord=target, sentinel_mask=pos_dict.sentinel_mask,
+            target_sentinel_mask=entry['sentinel_mask'] if entry is not None else None,
+            target_shape=shape, backend=self.backend,
+        )
+        pos_dict.sentinel_mask = sentinel
+        out_feat = _zero_sentinels(self.output_norm(out_feat), sentinel)
+        return out_coord, out_feat, out_shape, pos_dict
 
     def conv_forward(self, global_feat, pool):
-        global_feat = self.input_norm(global_feat)
-        x = self.conv(global_feat)
-        x = x.view(*x.shape[:-1], self.upscale_factor ** 2, self.conv.out_features // (self.upscale_factor ** 2))
-        global_feat_out = torch.mean(x, dim=-2)
-        global_feat_out = self.output_norm(global_feat_out)
-        return global_feat_out
+        x = self.conv(self.input_norm(global_feat))
+        x = x.view(*x.shape[:-1], self.upscale_factor ** 2, self.out_channels).mean(-2)
+        return self.output_norm(x)
+
 
 class ConvNextLayer(nn.Module):
     def __init__(self, in_channels, kernel_size, dilation, bias, ff_ratio,
@@ -508,261 +216,33 @@ class ConvNextLayer(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, coord, feat, spatial_shape, pos_dict=None):
+        from ..ops.convolution import sparse_submanifold_conv2d
         pos_dict = _sentinel_state(pos_dict, feat)
-        feat = _zero_sentinels(feat, pos_dict.sentinel_mask)
-        shortcut = feat
-        feat = _zero_sentinels(self.norm(feat), pos_dict.sentinel_mask)
-        dense_feat = _build_dense(coord, feat, spatial_shape)
-        mask = _build_mask(coord, spatial_shape)
-        dense_out_feat = self.dwconv(dense_feat.unsqueeze(0).permute(0, 3, 1, 2))
-        dense_out_feat = self.pwconv1(dense_out_feat)
-        dense_out_feat = self.act(dense_out_feat)
-        dense_out_feat = self.pwconv2(dense_out_feat)
-
+        shortcut = _zero_sentinels(feat, pos_dict.sentinel_mask)
+        normalized = _zero_sentinels(self.norm(shortcut), pos_dict.sentinel_mask)
+        out = sparse_submanifold_conv2d(coord, normalized, spatial_shape, self.dwconv,
+                                        backend=getattr(self, 'backend', 'auto'))
+        out = F.linear(out, self.pwconv1.weight[:, :, 0, 0], self.pwconv1.bias)
+        out = self.act(out)
+        out = F.linear(out, self.pwconv2.weight[:, :, 0, 0], self.pwconv2.bias)
         if self.gamma is not None:
-            dense_out_feat = self.gamma * dense_out_feat
-
-        dense_out_feat = dense_out_feat.squeeze(0).permute(1, 2, 0)
-        out_coord, out_feat, _ = _gather_by_mask(dense_out_feat, mask)
-
-        out_feat = self.drop_path(out_feat)
-        indices = _build_index_map(coord, spatial_shape)[out_coord[:, 0], out_coord[:, 1]].long() - 1
-        out_feat = shortcut[indices] + out_feat
-        pos_dict.sentinel_mask = pos_dict.sentinel_mask[indices]
-        out_feat = _zero_sentinels(out_feat, pos_dict.sentinel_mask)
-
-        return out_coord, out_feat, spatial_shape, pos_dict
+            out = out * self.gamma[:, 0, 0]
+        order = torch.argsort(coord[:, 0].long() * int(spatial_shape[1]) + coord[:, 1])
+        out = shortcut[order] + self.drop_path(out[order])
+        pos_dict.sentinel_mask = pos_dict.sentinel_mask[order]
+        return coord[order], _zero_sentinels(out, pos_dict.sentinel_mask), spatial_shape, pos_dict
 
     def conv_forward(self, global_feat, pool):
         shortcut = global_feat
-        global_feat = dense_ConvwithMM(self.dwconv, global_feat, pool)
-        global_feat = dense_ConvwithMM(self.pwconv1, global_feat, pool)
+        global_feat = _global_convolution(self.dwconv, global_feat, pool)
+        global_feat = _global_convolution(self.pwconv1, global_feat, pool)
         global_feat = self.act(global_feat)
-        global_feat = dense_ConvwithMM(self.pwconv2, global_feat, pool)
+        global_feat = _global_convolution(self.pwconv2, global_feat, pool)
         if self.gamma is not None:
             gamma = self.gamma.squeeze()
             global_feat = gamma * global_feat
         global_feat = shortcut + self.drop_path(global_feat)
         return global_feat
-
-class PatchMerge(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, dilation, groups, bias,
-                 norm_position='post'):
-        super(PatchMerge, self).__init__()
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.dilation = dilation
-        groups = groups
-
-        self.input_norm = _pre_norm(in_channels * 4, norm_position)
-        self.output_norm = _post_norm(out_channels, norm_position)
-        self.pwconv = nn.Linear(in_channels*4, out_channels, bias=bias)
-
-    def _patch_merging(self, x):
-        B, H, W, C = x.shape
-        if self.dilation == 2:
-            x0 = x[:, 0::2, 0::2, :]
-            x1 = x[:, 0::2, 1::2, :]
-            x2 = x[:, 1::2, 0::2, :]
-            x3 = x[:, 1::2, 1::2, :]
-            merged = torch.cat([x0, x1, x2, x3], -1)
-        else:
-            x = x.view(B, H//2, 2, W//2, 2, C)
-            x = x.permute(0, 1, 3, 2, 4, 5)
-            merged = x.reshape(B, H//2, W//2, 4*C)
-        return merged
-
-    def forward(self, coord, feat, spatial_shape, pos_dict=None):
-        pos_dict = _sentinel_state(pos_dict, feat)
-        feat = _zero_sentinels(feat, pos_dict.sentinel_mask)
-        dense_feat = _build_dense(coord, feat, spatial_shape)
-        mask = _build_mask(coord, spatial_shape)
-        sentinel_cells = _build_mask(coord[pos_dict.sentinel_mask], spatial_shape)
-        real_cells = _build_mask(coord[~pos_dict.sentinel_mask], spatial_shape)
-        pos_dict = _append_sparse_mask(pos_dict, coord, spatial_shape)
-
-        merged_feat = self._patch_merging(dense_feat.unsqueeze(0))
-        merged_feat = self.input_norm(merged_feat)
-        sentinel_slots = self._patch_merging(sentinel_cells[None, :, :, None]).bool()
-        merged_feat = merged_feat.masked_fill(sentinel_slots.repeat_interleave(feat.shape[1], dim=-1), 0)
-        dense_out_feat = self.pwconv(merged_feat).squeeze(0)
-
-        merged_mask = self._patch_merging(mask.unsqueeze(0).unsqueeze(-1))
-        out_mask = (merged_mask.sum(dim=-1) > 0).float().squeeze(0)
-        merged_real = self._patch_merging(real_cells[None, :, :, None]).sum(dim=-1).squeeze(0)
-
-        out_coord, out_feat, _ = _gather_by_mask(dense_out_feat, out_mask)
-        pos_dict.sentinel_mask = merged_real[out_coord[:, 0], out_coord[:, 1]] == 0
-        out_feat = _zero_sentinels(out_feat, pos_dict.sentinel_mask)
-        out_feat = _zero_sentinels(self.output_norm(out_feat), pos_dict.sentinel_mask)
-
-        spatial_shape = [*out_mask.shape[:2]]
-
-        return out_coord, out_feat, spatial_shape, pos_dict
-
-    def conv_forward(self, global_feat, pool):
-        B, D = global_feat.shape
-        merged = global_feat.unsqueeze(-1).expand(B, D, 4).reshape(B, 4 * D)
-        merged = self.input_norm(merged)
-        out = self.pwconv(merged)
-        out = self.output_norm(out)
-        return out
-
-class BasicBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, dilation, groups, bias,
-                 norm_position='post'):
-        super(BasicBlock, self).__init__()
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.dilation = dilation
-        groups = groups
-        self.input_norm = _pre_norm(in_channels, norm_position)
-        self.output_norm = _post_norm(out_channels, norm_position)
-
-        self.dwconv = nn.Conv2d(in_channels, out_channels, kernel_size,
-                              stride=stride, dilation=dilation, padding=0,
-                              bias=bias, groups=groups)
-
-    def forward(self, coord, feat, spatial_shape, pos_dict=None):
-        pos_dict = _sentinel_state(pos_dict, feat)
-        feat = _zero_sentinels(feat, pos_dict.sentinel_mask)
-        feat = _zero_sentinels(self.input_norm(feat), pos_dict.sentinel_mask)
-        dense_feat = _build_dense(coord, feat, spatial_shape)
-        mask = _build_mask(coord, spatial_shape)
-        real_mask = _build_mask(coord[~pos_dict.sentinel_mask], spatial_shape)
-        pos_dict = _append_sparse_mask(pos_dict, coord, spatial_shape)
-
-        dense_out_feat = self.dwconv(dense_feat.unsqueeze(0).permute(0, 3, 1, 2))
-        dense_out_feat = dense_out_feat.squeeze(0).permute(1, 2, 0)
-
-        with torch.no_grad():
-
-            unfold = nn.Unfold(
-                kernel_size=(self.kernel_size, self.kernel_size),
-                dilation=self.dilation,
-                stride=self.stride, padding=0,
-            )
-            unfolded_mask = unfold(mask.unsqueeze(0).unsqueeze(0))
-
-            out_mask = (unfolded_mask.sum(dim=1) > 0).float()
-            out_mask = out_mask.view(dense_out_feat.shape[0], dense_out_feat.shape[1])
-            unfolded_real = unfold(real_mask.unsqueeze(0).unsqueeze(0))
-            sentinel_cells = (unfolded_real.sum(dim=1) == 0).view(*out_mask.shape)
-
-        out_coord, out_feat, _ = _gather_by_mask(dense_out_feat, out_mask)
-        pos_dict.sentinel_mask = sentinel_cells[out_coord[:, 0], out_coord[:, 1]]
-        out_feat = _zero_sentinels(out_feat, pos_dict.sentinel_mask)
-        out_feat = _zero_sentinels(self.output_norm(out_feat), pos_dict.sentinel_mask)
-
-        spatial_shape = [*out_mask.shape[:2]]
-
-        return out_coord, out_feat, spatial_shape, pos_dict
-
-    def conv_forward(self, global_feat, pool):
-        global_feat = self.input_norm(global_feat)
-        out = dense_ConvwithMM(self.dwconv, global_feat, pool)
-        out = self.output_norm(out)
-        return out
-
-class InverseBasicBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, dilation, groups, bias):
-        super(InverseBasicBlock, self).__init__()
-        self.kernel_size = kernel_size
-        groups = groups
-
-        self.norm = nn.LayerNorm(out_channels)
-        self.upconv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size,
-                              stride=stride, dilation=dilation, bias=bias, groups=groups)
-
-        self.pwconv = nn.Identity()
-
-    def forward(self, coord, feat, spatial_shape, pos_dict):
-        pos_dict = _sentinel_state(pos_dict, feat)
-        feat = _zero_sentinels(feat, pos_dict.sentinel_mask)
-        dense_feat = _build_dense(coord, feat, spatial_shape)
-
-        dense_out_feat = self.upconv(dense_feat.unsqueeze(0).permute(0, 3, 1, 2)).squeeze(0).permute(1, 2, 0)
-        entry = pos_dict.pop()
-        out_coord, spatial_shape = _unpack_sparse_mask(entry)
-        out_feat = dense_out_feat[out_coord[:, 0], out_coord[:, 1]]
-        pos_dict.sentinel_mask = entry['sentinel_mask'].to(feat.device)
-        out_feat = self.pwconv(out_feat)
-        out_feat = _zero_sentinels(out_feat, pos_dict.sentinel_mask)
-        out_feat = _zero_sentinels(self.norm(out_feat), pos_dict.sentinel_mask)
-
-        return out_coord, out_feat, spatial_shape, pos_dict
-
-    def conv_forward(self, global_feat, pool):
-        global_feat_expanded = global_feat.unsqueeze(-1).unsqueeze(-1)
-
-        global_feat_out = self.upconv(global_feat_expanded)
-        if pool == 'mean':
-            global_feat_out = torch.nn.functional.adaptive_avg_pool2d(global_feat_out, (1, 1))
-        elif pool == 'max':
-            global_feat_out = torch.nn.functional.adaptive_max_pool2d(global_feat_out, (1, 1))
-
-        global_feat_out = global_feat_out.squeeze(-1).squeeze(-1)
-        global_feat_out = self.pwconv(global_feat_out)
-        global_feat_out = self.norm(global_feat_out)
-
-        return global_feat_out
-
-class PixelShuffle(nn.Module):
-    def __init__(self, in_channels, out_channels, stride, bias, norm_position='post'):
-        super(PixelShuffle, self).__init__()
-        self.upscale_factor = stride
-
-        self.input_norm = _pre_norm(in_channels, norm_position)
-        self.output_norm = _post_norm(out_channels, norm_position)
-
-        self.conv = nn.Linear(in_channels, out_channels * self.upscale_factor**2, bias=bias)
-        _init_pixel_shuffle_weight(self.conv.weight, self.upscale_factor)
-        if self.conv.bias is not None:
-            nn.init.zeros_(self.conv.bias)
-
-    def forward(self, coord, feat, spatial_shape, pos_dict):
-        pos_dict = _sentinel_state(pos_dict, feat)
-        feat = _zero_sentinels(feat, pos_dict.sentinel_mask)
-        feat = _zero_sentinels(self.input_norm(feat), pos_dict.sentinel_mask)
-        dense_feat = _build_dense(coord, feat, spatial_shape)
-        sentinel_cells = _build_mask(coord[pos_dict.sentinel_mask], spatial_shape)
-        x = self.conv(dense_feat)
-        x = x.masked_fill(sentinel_cells.bool()[:, :, None], 0)
-        x = x.unsqueeze(0).permute(0, 3, 1, 2)
-        x = nn.functional.pixel_shuffle(x, self.upscale_factor)
-        dense_out_feat = x.squeeze(0).permute(1, 2, 0)
-
-        if not pos_dict:
-            mask_matrix = _build_mask(coord, spatial_shape)
-
-            out_mask = F.interpolate(
-                mask_matrix.unsqueeze(0).unsqueeze(0),
-                scale_factor=self.upscale_factor,
-                mode='nearest'
-            ).squeeze(0).squeeze(0)
-            out_coord, out_feat, _ = _gather_by_mask(dense_out_feat, out_mask)
-            expanded_sentinels = F.interpolate(
-                sentinel_cells[None, None], scale_factor=self.upscale_factor, mode='nearest',
-            )[0, 0].bool()
-            pos_dict.sentinel_mask = expanded_sentinels[out_coord[:, 0], out_coord[:, 1]]
-            spatial_shape = [*out_mask.shape[:2]]
-        else:
-            entry = pos_dict.pop()
-            out_coord, spatial_shape = _unpack_sparse_mask(entry)
-            out_feat = dense_out_feat[out_coord[:, 0], out_coord[:, 1]]
-            pos_dict.sentinel_mask = entry['sentinel_mask'].to(feat.device)
-
-        out_feat = _zero_sentinels(out_feat, pos_dict.sentinel_mask)
-        out_feat = _zero_sentinels(self.output_norm(out_feat), pos_dict.sentinel_mask)
-        return out_coord, out_feat, spatial_shape, pos_dict
-
-    def conv_forward(self, global_feat, pool):
-        global_feat = self.input_norm(global_feat)
-        x = self.conv(global_feat)
-        x = x.view(*x.shape[:-1], self.upscale_factor**2, self.conv.out_features//(self.upscale_factor**2))
-        global_feat_out = torch.mean(x, dim=-2)
-        global_feat_out = self.output_norm(global_feat_out)
-        return global_feat_out
 
 class LinearLayer(nn.Module):
     def __init__(self, in_channels, out_channels, bias, activation, dropout, mlp_ratio, prenorm, drop_first):
@@ -793,7 +273,7 @@ class LinearLayer(nn.Module):
         feat = _zero_sentinels(feat, pos_dict.sentinel_mask)
 
         coord = coord.to(feat.device)
-        spatial_shape = (coord.int().max(dim=0)[0]+1).tolist()
+        spatial_shape = (coord.int().max(dim=0)[0]+1).tolist() if len(coord) else [0, 0]
         return coord, feat, spatial_shape, pos_dict
 
     def conv_forward(self, global_feat, pool=None):
@@ -816,7 +296,7 @@ class ProjectionLayer(nn.Module):
         feat = _zero_sentinels(feat, pos_dict.sentinel_mask)
         coord = coord.to(feat.device)
         if spatial_shape is None:
-            spatial_shape = (coord.int().max(dim=0)[0]+1).tolist()
+            spatial_shape = (coord.int().max(dim=0)[0]+1).tolist() if len(coord) else [0, 0]
         return coord, feat, spatial_shape, pos_dict
 
     def conv_forward(self, global_feat, pool=None):
@@ -841,120 +321,73 @@ class ConvolutionLayer(nn.Module):
         self.in_channels = in_channels
         self.out_channels = out_channels if out_channels is not None else in_channels
         self.global_strategy = kwargs.get('global_strategy', 'proj')
-
-        default_args = {'in_channels': in_channels, 'out_channels': out_channels, 'kernel_size': 2, 'stride': 2, 'dilation': 1, 'groups': 1,
-                        'bias': False, 'norm_position': 'post'
-        }
-        extra_defaults = {
-            'linear': { 'activation': 'ReLU', 'dropout': 0.0, 'mlp_ratio': 0.5, 'prenorm': False, 'drop_first': False},
-            'convnext': {'activation': 'GELU', 'ff_ratio': 2.0, 'drop_path': 0.0,'layer_scale': 1e-6}
-        }
-        if layer_type in extra_defaults:
-            default_args.update(extra_defaults[layer_type])
-        default_args.update(kwargs)
-        self.norm_position = _canonical_norm_position(default_args.get('norm_position', 'post'))
+        out_channels = self.out_channels
+        self.norm_position = _canonical_norm_position(kwargs.get('norm_position', 'post'))
         self.global_input_norm = _pre_norm(in_channels, self.norm_position)
-
-        blocks = {
-            'patchconv': lambda: s_PatchConvBlock(in_channels, out_channels, kernel_size=default_args['kernel_size'], stride=default_args['stride'],
-                                                dilation=default_args['dilation'], groups=default_args['groups'], bias=default_args['bias'],
-                                                edge_mode=default_args.get('edge_mode', 'none'),
-                                                edge_eps=default_args.get('edge_eps', 1e-6),
-                                                norm_position=self.norm_position),
-            'dwpatchconv': lambda: s_PatchConvBlock(in_channels, out_channels, kernel_size=default_args['kernel_size'], stride=default_args['stride'],
-                                                dilation=default_args['dilation'], groups=in_channels, bias=default_args['bias'],
-                                                edge_mode=default_args.get('edge_mode', 'none'),
-                                                edge_eps=default_args.get('edge_eps', 1e-6),
-                                                norm_position=self.norm_position),
-            'd_patchconv': lambda: BasicBlock(in_channels, out_channels, kernel_size=default_args['kernel_size'], stride=default_args['stride'],
-                                                dilation=default_args['dilation'], groups=default_args['groups'], bias=default_args['bias'],
-                                                norm_position=self.norm_position),
-            'd_dwpatchconv': lambda: BasicBlock(in_channels, out_channels, kernel_size=default_args['kernel_size'], stride=default_args['stride'],
-                                                dilation=default_args['dilation'], groups=in_channels, bias=default_args['bias'],
-                                                norm_position=self.norm_position),
-            's_patchconv': lambda: s_PatchConvBlock(in_channels, out_channels, kernel_size=default_args['kernel_size'], stride=default_args['stride'],
-                                                dilation=default_args['dilation'], groups=default_args['groups'], bias=default_args['bias'],
-                                                edge_mode=default_args.get('edge_mode', 'none'),
-                                                edge_eps=default_args.get('edge_eps', 1e-6),
-                                                norm_position=self.norm_position),
-            's_dwpatchconv': lambda: s_PatchConvBlock(in_channels, out_channels, kernel_size=default_args['kernel_size'], stride=default_args['stride'],
-                                                dilation=default_args['dilation'], groups=in_channels, bias=default_args['bias'],
-                                                edge_mode=default_args.get('edge_mode', 'none'),
-                                                edge_eps=default_args.get('edge_eps', 1e-6),
-                                                norm_position=self.norm_position),
-            'patchinvs': lambda: s_PatchInverseBlock(in_channels, out_channels, kernel_size=default_args['kernel_size'],
-                                                          stride=default_args['stride'], dilation=default_args['dilation'], groups=default_args['groups'],
-                                                          bias=default_args['bias']),
-            'dwpatchinvs': lambda: s_PatchInverseBlock(in_channels, out_channels, kernel_size=default_args['kernel_size'],
-                                                          stride=default_args['stride'], dilation=default_args['dilation'], groups=in_channels,
-                                                          bias=default_args['bias']),
-            'd_patchinvs': lambda: InverseBasicBlock(in_channels, out_channels, kernel_size=default_args['kernel_size'],
-                                                          stride=default_args['stride'], dilation=default_args['dilation'], groups=default_args['groups'],
-                                                          bias=default_args['bias']),
-            'd_dwpatchinvs': lambda: InverseBasicBlock(in_channels, out_channels, kernel_size=default_args['kernel_size'],
-                                                          stride=default_args['stride'], dilation=default_args['dilation'], groups=in_channels,
-                                                          bias=default_args['bias']),
-            's_patchinvs': lambda: s_PatchInverseBlock(in_channels, out_channels, kernel_size=default_args['kernel_size'],
-                                                          stride=default_args['stride'], dilation=default_args['dilation'], groups=default_args['groups'],
-                                                          bias=default_args['bias']),
-            's_dwpatchinvs': lambda: s_PatchInverseBlock(in_channels, out_channels, kernel_size=default_args['kernel_size'],
-                                                          stride=default_args['stride'], dilation=default_args['dilation'], groups=in_channels,
-                                                          bias=default_args['bias']),
-            'pixelshuffle': lambda: s_PixelShuffle(in_channels, out_channels, stride=default_args['stride'], bias=default_args['bias'],
-                                                   norm_position=self.norm_position),
-            'd_pixelshuffle': lambda: PixelShuffle(in_channels, out_channels, stride=default_args['stride'], bias=default_args['bias'],
-                                                   norm_position=self.norm_position),
-            's_pixelshuffle': lambda: s_PixelShuffle(in_channels, out_channels, stride=default_args['stride'], bias=default_args['bias'],
-                                                     norm_position=self.norm_position),
-            'linear': lambda: LinearLayer(in_channels, out_channels, bias=default_args['bias'], activation=default_args['activation'],
-                                          dropout=default_args['dropout'],
-                                          mlp_ratio=default_args['mlp_ratio'], prenorm=default_args['prenorm'],
-                                          drop_first=default_args['drop_first']),
-            'convnext': lambda: ConvNextLayer(in_channels, kernel_size=default_args['kernel_size'], dilation=default_args['dilation'],
-                                              bias=default_args['bias'], ff_ratio=default_args['ff_ratio'],
-                                              drop_path=default_args['drop_path'], activation=default_args['activation'],
-                                              layer_scale=default_args['layer_scale']),
-            'patchmerge': lambda: s_PatchMerge(in_channels, out_channels, kernel_size=default_args['kernel_size'],
-                                             stride=default_args['stride'], dilation=default_args['dilation'],
-                                             groups=default_args['groups'], bias=default_args['bias'],
-                                             edge_mode=default_args.get('edge_mode', 'none'),
-                                             edge_eps=default_args.get('edge_eps', 1e-6),
-                                             norm_position=self.norm_position),
-            'd_patchmerge': lambda: PatchMerge(in_channels, out_channels, kernel_size=default_args['kernel_size'],
-                                             stride=default_args['stride'], dilation=default_args['dilation'],
-                                             groups=default_args['groups'], bias=default_args['bias'],
-                                             norm_position=self.norm_position),
-            's_patchmerge': lambda: s_PatchMerge(in_channels, out_channels, kernel_size=default_args['kernel_size'],
-                                             stride=default_args['stride'], dilation=default_args['dilation'],
-                                             groups=default_args['groups'], bias=default_args['bias'],
-                                             edge_mode=default_args.get('edge_mode', 'none'),
-                                             edge_eps=default_args.get('edge_eps', 1e-6),
-                                             norm_position=self.norm_position),
-            'projection': lambda: ProjectionLayer(in_channels, out_channels, bias=default_args['bias']),
-            'identity': lambda: IdentityLayer()
-        }
-        if layer_type not in blocks:
-            raise ValueError(f"Unsupported block type: {layer_type}. Available types: {list(blocks.keys())}")
-        self.conv_block = blocks[layer_type]()
+        backend = kwargs.get('sparse_backend', 'auto')
+        if backend not in ('auto', 'torch', 'triton'):
+            raise ValueError('sparse_backend must be auto/torch/triton')
+        kind = layer_type
+        spatial = dict(kernel_size=kwargs.get('kernel_size', 2), stride=kwargs.get('stride', 2),
+                       dilation=kwargs.get('dilation', 1), groups=kwargs.get('groups', 1),
+                       bias=kwargs.get('bias', False), backend=backend)
+        if kind in ('patchconv', 'dwpatchconv', 'patchinvs', 'dwpatchinvs'):
+            groups = in_channels if kind.startswith('dw') else spatial['groups']
+            if groups <= 0 or in_channels % groups or out_channels % groups:
+                raise ValueError(
+                    f"{kind}: in_channels={in_channels} and out_channels={out_channels} "
+                    f"must both be divisible by groups={groups}. "
+                    "Depthwise layers use groups=in_channels; channel reduction requires "
+                    "a separate projection or a non-depthwise layer. For decoder concat "
+                    "skips, use patchinvs/pixelshuffle or adjust the skip and channel settings."
+                )
+        norm = dict(norm_position=self.norm_position)
+        edge = dict(edge_mode=kwargs.get('edge_mode', 'none'), edge_eps=kwargs.get('edge_eps', 1e-6))
+        if kind in ('patchconv', 'dwpatchconv'):
+            if kind.startswith('dw'):
+                spatial['groups'] = in_channels
+            self.conv_block = PatchConvBlock(in_channels, out_channels, **spatial, **norm, **edge)
+        elif kind in ('patchinvs', 'dwpatchinvs'):
+            if kind.startswith('dw'):
+                spatial['groups'] = in_channels
+            self.conv_block = PatchInverseBlock(in_channels, out_channels, **spatial)
+        elif kind == 'patchmerge':
+            self.conv_block = PatchMerge(in_channels, out_channels, **spatial, **norm, **edge)
+        elif kind == 'pixelshuffle':
+            self.conv_block = PixelShuffle(in_channels, out_channels, spatial['stride'], spatial['bias'],
+                                           backend=backend, **norm)
+        elif kind == 'linear':
+            self.conv_block = LinearLayer(in_channels, out_channels, kwargs.get('bias', False),
+                kwargs.get('activation', 'ReLU'), kwargs.get('dropout', 0.), kwargs.get('mlp_ratio', .5),
+                kwargs.get('prenorm', False), kwargs.get('drop_first', False))
+        elif kind == 'convnext':
+            self.conv_block = ConvNextLayer(in_channels, spatial['kernel_size'], spatial['dilation'],
+                spatial['bias'], kwargs.get('ff_ratio', 2.), kwargs.get('drop_path', 0.),
+                kwargs.get('activation', 'GELU'), kwargs.get('layer_scale', 1e-6))
+            self.conv_block.backend = backend
+        elif kind == 'projection':
+            self.conv_block = ProjectionLayer(in_channels, out_channels, kwargs.get('bias', False))
+        elif kind == 'identity':
+            self.conv_block = IdentityLayer()
+        else:
+            raise ValueError(f'Unsupported block type: {layer_type}')
         self._init_global_modules()
 
     def _init_global_modules(self):
         if self.global_strategy == 'proj':
-            C_in = self.in_channels
-            C_out = self.out_channels
-            self.g_proj = nn.Linear(C_in, C_out, bias=True)
-        if self.global_strategy == 'identity':
-            self.identity_proj = nn.Linear(self.in_channels, self.out_channels) if self.in_channels != self.out_channels else nn.Identity()
+            self.g_proj = nn.Linear(self.in_channels, self.out_channels, bias=True)
+        elif self.global_strategy == 'identity':
+            self.identity_proj = (nn.Linear(self.in_channels, self.out_channels)
+                                  if self.in_channels != self.out_channels else nn.Identity())
 
     def forward(self, coord, feat, spatial_shape=None, pos_dict=None):
         if spatial_shape is None:
-            spatial_shape = (coord.int().max(dim=0)[0] + 1).tolist()
+            spatial_shape = ((coord.int().max(0).values + 1).tolist() if len(coord) else [0, 0])
         pos_dict = _sentinel_state(pos_dict, feat)
         coord = coord.to(feat.device)
         feat = _zero_sentinels(feat, pos_dict.sentinel_mask)
         out_coord, out_feat, spatial_shape, pos_dict = self.conv_block(coord, feat, spatial_shape, pos_dict)
-        out_feat = _zero_sentinels(out_feat, pos_dict.sentinel_mask)
-        return out_coord, out_feat, spatial_shape, pos_dict
+        return out_coord, _zero_sentinels(out_feat, pos_dict.sentinel_mask), spatial_shape, pos_dict
 
     def conv_forward(self, global_feat):
         if self.global_strategy == 'kernel':

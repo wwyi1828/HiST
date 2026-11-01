@@ -1,7 +1,5 @@
 import torch
 from torch import nn
-import dgl.function as fn
-from dgl.nn.functional import edge_softmax
 from timm.layers import DropPath
 from ..functional import create_activation
 from .positional_encoding import apply_rope_2d_partial, RelativePositionBias, ALiBiPositionBias
@@ -69,11 +67,8 @@ class BaseTransformerLayer(nn.Module):
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
 
-    def flexible_attention(self, graph, feat, global_feat, ins_pos=None, alter_qkv=False, mask_type='local'):
+    def flexible_attention(self, plan, feat, global_feat, ins_pos=None, alter_qkv=False, mask_type='local'):
 
-        graph = graph.local_var()
-
-        num_local = feat.size(0)
         all_feats = torch.cat([feat, global_feat], dim=0)
 
         if alter_qkv:
@@ -95,79 +90,32 @@ class BaseTransformerLayer(nn.Module):
             q = apply_rope_2d_partial(q, extended_pos, rotary_dim=self.rope_dim, base=self.rope_theta)
             k = apply_rope_2d_partial(k, extended_pos, rotary_dim=self.rope_dim, base=self.rope_theta)
 
-        graph.srcdata.update({'k': k, 'v': v})
-        graph.dstdata.update({'q': q})
-        graph.apply_edges(fn.u_dot_v('k', 'q', 'a'))
-
-        if (ins_pos is not None) and (mask_type == 'local'):
-            src_indices, dst_indices = graph.edges()
-
-            valid_edges_mask = torch.nonzero((src_indices < num_local) & (dst_indices < num_local), as_tuple=False).view(-1)
-
-            valid_src_indices = src_indices[valid_edges_mask]
-            valid_dst_indices = dst_indices[valid_edges_mask]
-            x_diff = ins_pos[valid_src_indices, 0] - ins_pos[valid_dst_indices, 0]
-            y_diff = ins_pos[valid_src_indices, 1] - ins_pos[valid_dst_indices, 1]
-
-            pos_bias = None
-            if self.pos_emb_type == 'rpb' and hasattr(self, 'table_RPB') and self.table_RPB is not None:
-                valid_bias = self.table_RPB(x_diff, y_diff)
-                pos_bias = torch.zeros((src_indices.size(0), self.num_heads, 1), device=ins_pos.device)
-                pos_bias[valid_edges_mask] = valid_bias
+        from ..ops.attention import attention
+        bias_table = slopes = None
+        if ins_pos is not None and mask_type == 'local':
+            if self.pos_emb_type == 'rpb' and self.table_RPB is not None:
+                bias_table = self.table_RPB.adjustment_tables
             elif self.pos_emb_type == 'alibi':
-                valid_bias = self.pos_encoder(x_diff, y_diff)
-                pos_bias = torch.zeros((src_indices.size(0), self.num_heads, 1), device=ins_pos.device)
-                pos_bias[valid_edges_mask] = valid_bias
-
-            if pos_bias is not None:
-                graph.edata['a'] = edge_softmax(graph, graph.edata['a'] * self.scaling + pos_bias)
-            else:
-                graph.edata['a'] = edge_softmax(graph, graph.edata['a'] * self.scaling)
-        else:
-            graph.edata['a'] = edge_softmax(graph, graph.edata['a'] * self.scaling)
-
-        graph.edata["a"] = self.attn_drop(graph.edata["a"])
-        graph.update_all(fn.u_mul_e('v', 'a', 'attn'), fn.sum('attn', 'agg_feat'))
-        attn_out = graph.dstdata['agg_feat'].flatten(1)
-        return attn_out
+                slopes = self.pos_encoder.slopes
+        return attention(
+            q, k, v, plan, bias_table=bias_table, alibi_slopes=slopes,
+            dropout_p=self.attn_drop.p, training=self.training,
+        ).flatten(1)
 
     def forward(self, *args):
         raise NotImplementedError("This method should be overridden by subclasses")
 
-class HybridTransLayer(BaseTransformerLayer):
-    def forward(self, feat, global_feat, g1, g2, ins_pos=None):
-
-        shortcut = torch.cat([feat, global_feat], dim=0)
-        feat = self.norm1(feat)
-        global_feat = self.norm1(global_feat)
-
-        attn_out = 0
-        if g1 is not None:
-            attn_out += self.flexible_attention(g1, feat, global_feat, ins_pos, alter_qkv=False, mask_type='local')
-        if global_feat.size(0) > 0:
-            attn_out += self.flexible_attention(g2, feat, global_feat, ins_pos, alter_qkv=True, mask_type='global')
-
-        attn_out = self.fc_out(attn_out)
-        attn_out = self.proj_drop(attn_out)
-        feats = shortcut + self.drop_path(attn_out)
-
-        feats = feats + self.drop_path(self.ffn(self.norm2(feats)))
-
-        feat = feats[:feat.size(0)]
-        global_feat = feats[feat.size(0):]
-        return feat, global_feat
-
 class SwinTransLayer(BaseTransformerLayer):
-    def forward(self, feat, global_feat, g1, g2, ins_pos=None):
+    def forward(self, feat, global_feat, plan1, plan2, ins_pos=None):
 
         shortcut = torch.cat([feat, global_feat], dim=0)
         feat = self.norm1(feat)
         global_feat = self.norm1(global_feat)
         attn_out = 0
-        if g1 is not None:
-            attn_out += self.flexible_attention(g1, feat, global_feat, ins_pos, alter_qkv=False, mask_type='local')
-        if g2 is not None:
-            attn_out += self.flexible_attention(g2, feat, global_feat, ins_pos, alter_qkv=True, mask_type='local')
+        if plan1 is not None:
+            attn_out += self.flexible_attention(plan1, feat, global_feat, ins_pos, alter_qkv=False, mask_type='local')
+        if plan2 is not None:
+            attn_out += self.flexible_attention(plan2, feat, global_feat, ins_pos, alter_qkv=True, mask_type='local')
 
         attn_out = self.fc_out(attn_out)
         attn_out = self.proj_drop(attn_out)
@@ -180,8 +128,8 @@ class SwinTransLayer(BaseTransformerLayer):
         return feat, global_feat
 
 class TradSwinTransLayer(BaseTransformerLayer):
-    def __init__(self, embed_dim, num_heads, attn_drop, proj_drop, drop_path, activation='GELU', w_RPB=None, ff_ratio=2, pos_std=0.02, share_qkv=None):
-        super(TradSwinTransLayer, self).__init__(embed_dim, num_heads, attn_drop, proj_drop, drop_path, activation, w_RPB, ff_ratio, pos_std, share_qkv=False)
+    def __init__(self, embed_dim, num_heads, attn_drop, proj_drop, drop_path, activation='GELU', w_RPB=None, ff_ratio=2, pos_std=0.02, share_qkv=None, **kwargs):
+        super(TradSwinTransLayer, self).__init__(embed_dim, num_heads, attn_drop, proj_drop, drop_path, activation, w_RPB, ff_ratio, pos_std, share_qkv=False, **kwargs)
         if w_RPB is not None:
             self.table_RPB  = RelativePositionBias(num_heads, 2*w_RPB, learned_pos=True, pos_std=pos_std)
         self.fc_out_2 = nn.Linear(embed_dim, embed_dim)
@@ -203,12 +151,12 @@ class TradSwinTransLayer(BaseTransformerLayer):
         self.norm3 = nn.LayerNorm(embed_dim)
         self.norm4 = nn.LayerNorm(embed_dim)
 
-    def forward(self, feat, global_feat, g1, g2, ins_pos=None):
+    def forward(self, feat, global_feat, plan1, plan2, ins_pos=None):
 
         shortcut = torch.cat([feat, global_feat], dim=0)
         feat = self.norm1(feat)
         global_feat = self.norm1(global_feat)
-        attn_out = self.flexible_attention(g1, feat, global_feat, ins_pos, alter_qkv=False, mask_type='local')
+        attn_out = self.flexible_attention(plan1, feat, global_feat, ins_pos, alter_qkv=False, mask_type='local')
         attn_out = self.fc_out(attn_out)
         attn_out = self.proj_drop(attn_out)
         feats = shortcut + self.drop_path(attn_out)
@@ -220,7 +168,7 @@ class TradSwinTransLayer(BaseTransformerLayer):
         shortcut = torch.cat([feat, global_feat], dim=0)
         feat = self.norm3(feat)
         global_feat = self.norm3(global_feat)
-        attn_out = self.flexible_attention(g2, feat, global_feat, ins_pos, alter_qkv=True, mask_type='local')
+        attn_out = self.flexible_attention(plan2, feat, global_feat, ins_pos, alter_qkv=True, mask_type='local')
         attn_out = self.fc_out_2(attn_out)
         attn_out = self.proj_drop(attn_out)
         feats = shortcut + self.drop_path(attn_out)
@@ -234,7 +182,7 @@ class IdentityTransLayer(nn.Module):
     def __init__(self):
         super(IdentityTransLayer, self).__init__()
 
-    def forward(self, feat, global_feat, **kargs):
+    def forward(self, feat, global_feat, *args, **kwargs):
         return feat, global_feat
 
 class LinearTransLayer(nn.Module):
@@ -242,22 +190,22 @@ class LinearTransLayer(nn.Module):
         super(LinearTransLayer, self).__init__()
         self.dim_reduc = nn.Linear(in_channels, out_channels, bias)
 
-    def forward(self, feat, global_feat, **kargs):
+    def forward(self, feat, global_feat, *args, **kwargs):
         feat = self.dim_reduc(feat)
         return feat, global_feat
 
 class LongformerTransLayer(BaseTransformerLayer):
-    def forward(self, feat, global_feat, g1, g2, ins_pos=None):
+    def forward(self, feat, global_feat, plan1, plan2, ins_pos=None):
 
         shortcut = torch.cat([feat, global_feat], dim=0)
         feat = self.norm1(feat)
         global_feat = self.norm1(global_feat)
 
         attn_out = 0
-        if g1 is not None:
-            attn_out += self.flexible_attention(g1, feat, global_feat, ins_pos, alter_qkv=False, mask_type='local')
+        if plan1 is not None:
+            attn_out += self.flexible_attention(plan1, feat, global_feat, ins_pos, alter_qkv=False, mask_type='local')
         if global_feat.size(0) > 0:
-            attn_out += self.flexible_attention(g2, feat, global_feat, ins_pos, alter_qkv=True, mask_type='global')
+            attn_out += self.flexible_attention(plan2, feat, global_feat, ins_pos, alter_qkv=True, mask_type='global')
 
         attn_out = self.fc_out(attn_out)
         attn_out = self.proj_drop(attn_out)
@@ -268,6 +216,10 @@ class LongformerTransLayer(BaseTransformerLayer):
         feat = feats[:feat.size(0)]
         global_feat = feats[feat.size(0):]
         return feat, global_feat
+
+class HybridTransLayer(LongformerTransLayer):
+    pass
+
 
 class TransformerLayer(nn.Module):
     def __init__(self, layer_type: str, embed_dim=None, num_heads=None, **kwargs):
@@ -282,8 +234,10 @@ class TransformerLayer(nn.Module):
             'hybrid': lambda: HybridTransLayer(**default_args),
             'hybrid_noshift': lambda: HybridTransLayer(**default_args),
             'swin': lambda: SwinTransLayer(**default_args),
+            'swin_global': lambda: SwinTransLayer(**default_args),
             'tradswin': lambda: TradSwinTransLayer(**default_args),
             'long': lambda: LongformerTransLayer(**default_args),
+            'long_noshift': lambda: LongformerTransLayer(**default_args),
             'linear': lambda: LinearTransLayer(in_channels=kwargs.get('in_channels', embed_dim), out_channels=kwargs.get('out_channels', embed_dim),
                                                 bias=kwargs.get('bias', True)
             ),
@@ -295,5 +249,5 @@ class TransformerLayer(nn.Module):
 
         self.trans_block = blocks[layer_type]()
 
-    def forward(self, feat, global_feat, g1=None, g2=None, ins_pos=None):
-        return self.trans_block(feat, global_feat, g1, g2, ins_pos)
+    def forward(self, feat, global_feat, plan1=None, plan2=None, ins_pos=None):
+        return self.trans_block(feat, global_feat, plan1, plan2, ins_pos)

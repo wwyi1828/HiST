@@ -120,7 +120,7 @@ class SPAN_Block(nn.Module):
                 attn_builder = step[1]
                 compute_1, compute_2 = attn_builder(
                     ins_pos, global_feat.size(0), mode=attn_builder.mode,
-                    sentinel_mask=pos_dict.sentinel_mask,
+                    sentinel_mask=pos_dict.sentinel_mask, spatial_shape=spatial_shape,
                 )
 
             elif step_type == 'trans':
@@ -129,7 +129,7 @@ class SPAN_Block(nn.Module):
                 trans_layers = self.modules_dict[module_name]
 
                 for trans_layer in trans_layers:
-                    feat, global_feat = trans_layer(feat, global_feat, g1=compute_1, g2=compute_2, ins_pos=attn_builder.positions)
+                    feat, global_feat = trans_layer(feat, global_feat, plan1=compute_1, plan2=compute_2, ins_pos=attn_builder.positions)
                     feat = feat.masked_fill(pos_dict.sentinel_mask[:, None], 0)
 
             elif step_type == 'skipc':

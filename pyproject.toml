@@ -22,7 +22,6 @@ dependencies = [
     "hydra-core",
     "omegaconf",
     "wandb",
-    "dgl",
 ]
 
 [tool.setuptools]

@@ -1,4 +1,5 @@
 slide_configs: "111-21"
+sparse_backend: auto
 channel_factor: 1
 trans_type: "hybrid"
 dtrans_type: "hybrid"
